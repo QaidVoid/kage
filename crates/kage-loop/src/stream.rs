@@ -73,13 +73,14 @@ pub(crate) fn collect_turn<F: FnMut(LoopEvent)>(
 
     for event in stream {
         if cancel.is_cancelled() {
+            if let Ok(ProviderEvent::MessageEnd { usage, .. }) = event {
+                emit(LoopEvent::RejectedUsage { usage });
+            }
             return Err(TurnFailure::Fatal(LoopError::Cancelled));
         }
         let event = event.map_err(TurnFailure::Provider)?;
 
-        if let Some(result) =
-            handle_event(event, &mut assembler, &mut started, emit).map_err(TurnFailure::Fatal)?
-        {
+        if let Some(result) = handle_event(event, &mut assembler, &mut started, emit)? {
             return Ok(result);
         }
     }
@@ -97,7 +98,7 @@ fn handle_event<F: FnMut(LoopEvent)>(
     assembler: &mut Assembler,
     started: &mut bool,
     emit: &mut F,
-) -> Result<Option<TurnResult>, LoopError> {
+) -> Result<Option<TurnResult>, TurnFailure> {
     let id = assembler.message_id;
     let mut ensure_started = |emit: &mut F| {
         if !*started {
@@ -171,7 +172,9 @@ fn handle_event<F: FnMut(LoopEvent)>(
         }
         ProviderEvent::ToolCallEnd { id: call_id, input } => {
             assembler.partial_args.remove(&call_id);
-            let (call_id, name, input) = assembler.complete_tool(call_id, input)?;
+            let (call_id, name, input) = assembler
+                .complete_tool(call_id, input)
+                .map_err(TurnFailure::Fatal)?;
             emit(LoopEvent::ToolCallStart {
                 id: call_id.clone(),
                 name: name.clone(),
@@ -185,12 +188,7 @@ fn handle_event<F: FnMut(LoopEvent)>(
         }
         ProviderEvent::MessageEnd { usage, stop_reason } => {
             ensure_started(emit);
-            emit(LoopEvent::MessageEnd {
-                id,
-                usage,
-                stop_reason,
-            });
-            return Ok(Some(assembler.finish(usage)));
+            return assembler.finish(usage, stop_reason, emit).map(Some);
         }
     }
     Ok(None)
@@ -352,9 +350,39 @@ impl Assembler {
         Ok((id, name, input))
     }
 
-    fn finish(&mut self, usage: TokenUsage) -> TurnResult {
+    fn finish<F: FnMut(LoopEvent)>(
+        &mut self,
+        usage: TokenUsage,
+        stop_reason: kage_core::StopReason,
+        emit: &mut F,
+    ) -> Result<TurnResult, TurnFailure> {
+        let visible = self.blocks.iter().any(|block| match block {
+            Content::Text { text } => !text.trim().is_empty(),
+            Content::Image { .. } | Content::Audio { .. } => true,
+            _ => false,
+        });
+        if self.tool_calls.is_empty() && !visible {
+            emit(LoopEvent::RejectedUsage { usage });
+            let message = format!(
+                "model ended its turn with no visible output or tool calls ({stop_reason:?})"
+            );
+            let error = match stop_reason {
+                kage_core::StopReason::EndTurn | kage_core::StopReason::ToolUse => {
+                    ProviderError::Transport(message)
+                }
+                kage_core::StopReason::MaxTokens
+                | kage_core::StopReason::StopSequence
+                | kage_core::StopReason::Other => ProviderError::Decode(message),
+            };
+            return Err(TurnFailure::Provider(error));
+        }
         self.end_thinking();
-        TurnResult {
+        emit(LoopEvent::MessageEnd {
+            id: self.message_id,
+            usage,
+            stop_reason,
+        });
+        Ok(TurnResult {
             message: Message {
                 role: Role::Assistant,
                 content: std::mem::take(&mut self.blocks),
@@ -364,9 +392,12 @@ impl Assembler {
             },
             tool_calls: std::mem::take(&mut self.tool_calls),
             usage,
-        }
+        })
     }
 }
+
+#[cfg(test)]
+mod empty_turns;
 
 #[cfg(test)]
 mod tests {
@@ -515,10 +546,15 @@ mod tests {
 
     #[test]
     fn message_end_forwards_stop_reason() {
-        let (_, emitted) = run_collect_with_emits(vec![Ok(ProviderEvent::MessageEnd {
-            stop_reason: StopReason::MaxTokens,
-            usage: TokenUsage::default(),
-        })]);
+        let (_, emitted) = run_collect_with_emits(vec![
+            Ok(ProviderEvent::TextDelta {
+                delta: "partial".into(),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::MaxTokens,
+                usage: TokenUsage::default(),
+            }),
+        ]);
         assert!(matches!(
             emitted.last().unwrap(),
             LoopEvent::MessageEnd {
@@ -867,7 +903,10 @@ mod tests {
     #[test]
     fn parent_id_is_carried_through() {
         let parent = MessageId::new();
-        let mock = MockProvider::replaying(vec![Ok(end_event())]);
+        let mock = MockProvider::replaying(vec![
+            Ok(ProviderEvent::TextDelta { delta: "hi".into() }),
+            Ok(end_event()),
+        ]);
         let cancel = CancelFlag::new();
         let stream = mock
             .stream(StreamRequest::new("m", vec![]), &cancel)

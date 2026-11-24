@@ -38,6 +38,7 @@ pub fn apply_loop_event(buf: &mut Buffer, event: &LoopEvent) {
         LoopEvent::MessageStart { id } => buf.start_attempt(id.to_string()),
         LoopEvent::MessageAppended { .. }
         | LoopEvent::TurnStarted { .. }
+        | LoopEvent::RejectedUsage { .. }
         | LoopEvent::CompactionStarted { .. } => {}
         LoopEvent::TurnEnded { .. } => buf.finish_attempt(),
         LoopEvent::TextDelta { delta, .. } => buf.append_assistant_delta(delta),
@@ -1082,6 +1083,15 @@ mod tests {
             },
         );
         buf.push_custom("kage:notify", "preserved", false);
+        apply_loop_event(
+            &mut buf,
+            &LoopEvent::RejectedUsage {
+                usage: TokenUsage {
+                    input: 137_000,
+                    ..TokenUsage::default()
+                },
+            },
+        );
         apply_loop_event(
             &mut buf,
             &LoopEvent::ProviderRetry {

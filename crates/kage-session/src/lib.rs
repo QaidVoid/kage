@@ -31,8 +31,8 @@ pub use blobs::BlobStore;
 pub use catalog::CATALOG_FILE;
 pub use entry::{
     BranchEntry, Compaction, Custom, EntryId, ExternalAcpSession, FORMAT_VERSION, Header, Label,
-    MessageEntry, ModelChange, SessionBackend, SessionEntry, SessionId, SessionTitle,
-    ThinkingLevelChange,
+    MessageEntry, ModelChange, RejectedUsage, SessionBackend, SessionEntry, SessionId,
+    SessionTitle, ThinkingLevelChange,
 };
 pub use error::SessionError;
 pub use fork::{Snapshot, fork, fork_as, resolve_entry_prefix, snapshot};

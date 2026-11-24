@@ -84,7 +84,7 @@ pub enum SessionEntry {
     /// branch; replay, fork and the session list follow the marker and
     /// ignore them. Written by an in-place undo or rewind.
     Branch(BranchEntry),
-    /// A plugin-defined entry the core does not interpret.
+    /// A namespaced extension record, including reserved core payloads.
     Custom(Custom),
 }
 
@@ -470,7 +470,84 @@ impl ExternalAcpPresentation {
     }
 }
 
-/// Plugin-defined entry. The reserved external presentation kind is validated.
+const REJECTED_USAGE_KIND: &str = "kage:rejected_usage";
+
+/// Usage charged for a rejected provider response, without a completed message.
+///
+/// Stored as a reserved custom record so readers that do not recognize the
+/// kind can still read the session. Replay includes this usage in cumulative
+/// totals without changing history, context fill, or compaction cards. The
+/// payload is a flat object containing the four token-usage fields.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(from = "RejectedUsageData", into = "RejectedUsageData")]
+pub struct RejectedUsage {
+    /// Provider-reported usage charged for the rejected response.
+    pub usage: TokenUsage,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RejectedUsageData {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+}
+
+impl From<RejectedUsageData> for RejectedUsage {
+    fn from(data: RejectedUsageData) -> Self {
+        Self {
+            usage: TokenUsage {
+                input: data.input,
+                output: data.output,
+                cache_read: data.cache_read,
+                cache_write: data.cache_write,
+            },
+        }
+    }
+}
+
+impl From<RejectedUsage> for RejectedUsageData {
+    fn from(record: RejectedUsage) -> Self {
+        Self {
+            input: record.usage.input,
+            output: record.usage.output,
+            cache_read: record.usage.cache_read,
+            cache_write: record.usage.cache_write,
+        }
+    }
+}
+
+impl RejectedUsage {
+    /// Wrap rejected usage in an appendable accounting-only custom entry.
+    #[must_use]
+    pub fn into_entry(self, id: EntryId, ts: DateTime<Utc>) -> SessionEntry {
+        SessionEntry::Custom(Custom {
+            id,
+            ts,
+            kind: REJECTED_USAGE_KIND.to_owned(),
+            data: serde_json::to_value(self).expect("rejected usage serializes to JSON"),
+        })
+    }
+
+    /// Decode a reserved rejected-usage record. Other kinds return `None`.
+    ///
+    /// Malformed or unsupported reserved payloads return an error. Callers
+    /// must not discard such errors or infer usage from an invalid payload.
+    pub fn from_custom(custom: &Custom) -> Result<Option<Self>, serde_json::Error> {
+        if custom.kind != REJECTED_USAGE_KIND {
+            return Ok(None);
+        }
+        if !custom.data.is_object() {
+            return Err(serde::de::Error::custom(
+                "rejected usage payload must be an object",
+            ));
+        }
+        serde_json::from_value(custom.data.clone()).map(Some)
+    }
+}
+
+/// Plugin-defined entry. Reserved core kinds have validated payloads.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(try_from = "UncheckedCustom")]
 pub struct Custom {
@@ -480,7 +557,7 @@ pub struct Custom {
     pub ts: DateTime<Utc>,
     /// Plugin-defined kind tag, namespaced like `plugin:tps`.
     pub kind: String,
-    /// Plugin payload. The external presentation kind has a strict schema.
+    /// Plugin payload. Reserved core kinds have strict schemas.
     pub data: serde_json::Value,
 }
 
@@ -592,9 +669,13 @@ impl TryFrom<UncheckedCustom> for Custom {
     type Error = serde_json::Error;
 
     fn try_from(value: UncheckedCustom) -> Result<Self, Self::Error> {
-        if value.kind == EXTERNAL_ACP_PRESENTATION_KIND && value.data.duplicate_field {
+        if matches!(
+            value.kind.as_str(),
+            EXTERNAL_ACP_PRESENTATION_KIND | REJECTED_USAGE_KIND
+        ) && value.data.duplicate_field
+        {
             return Err(serde::de::Error::custom(
-                "duplicate field in external ACP presentation",
+                "duplicate field in reserved custom payload",
             ));
         }
         let custom = Self {
@@ -604,6 +685,7 @@ impl TryFrom<UncheckedCustom> for Custom {
             data: value.data.value,
         };
         ExternalAcpPresentation::from_custom(&custom)?;
+        RejectedUsage::from_custom(&custom)?;
         Ok(custom)
     }
 }
@@ -618,6 +700,7 @@ impl Serialize for Custom {
             data: &'a serde_json::Value,
         }
         ExternalAcpPresentation::from_custom(self).map_err(serde::ser::Error::custom)?;
+        RejectedUsage::from_custom(self).map_err(serde::ser::Error::custom)?;
         CustomRef {
             id: self.id,
             ts: self.ts,
@@ -812,6 +895,108 @@ mod tests {
         let line = serde_json::to_string(&entry).unwrap();
         let back: SessionEntry = serde_json::from_str(&line).unwrap();
         assert_eq!(entry, back);
+    }
+
+    #[test]
+    fn rejected_usage_round_trips_as_a_backward_compatible_custom_record() {
+        #[derive(Deserialize)]
+        struct LegacyCustom {
+            id: EntryId,
+            ts: DateTime<Utc>,
+            kind: String,
+            data: serde_json::Value,
+        }
+
+        let record = crate::RejectedUsage {
+            usage: TokenUsage {
+                input: 11,
+                output: 7,
+                cache_read: 5,
+                cache_write: 3,
+            },
+        };
+        let id = EntryId::new();
+        let ts = Utc::now();
+        let entry = record.into_entry(id, ts);
+        let line = serde_json::to_string(&entry).unwrap();
+        let decoded: SessionEntry = serde_json::from_str(&line).unwrap();
+        assert_eq!(entry, decoded);
+        let SessionEntry::Custom(custom) = decoded else {
+            panic!("expected a custom record");
+        };
+        assert_eq!(RejectedUsage::from_custom(&custom).unwrap(), Some(record));
+        let legacy: LegacyCustom = serde_json::from_str(&line).unwrap();
+        assert_eq!(legacy.id, id);
+        assert_eq!(legacy.ts, ts);
+        assert_eq!(legacy.kind, "kage:rejected_usage");
+        assert_eq!(
+            legacy.data,
+            serde_json::json!({
+                "input": 11, "output": 7, "cache_read": 5, "cache_write": 3,
+            })
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap()["type"],
+            "custom"
+        );
+    }
+
+    #[test]
+    fn rejected_usage_does_not_guess_unknown_custom_kinds() {
+        let custom = Custom {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            kind: "plugin:rejected_usage".into(),
+            data: serde_json::json!({"input": 1}),
+        };
+        assert_eq!(RejectedUsage::from_custom(&custom).unwrap(), None);
+        assert!(serde_json::to_string(&custom).is_ok());
+    }
+
+    #[test]
+    fn rejected_usage_rejects_malformed_reserved_payloads() {
+        for data in [
+            serde_json::json!({}),
+            serde_json::json!(null),
+            serde_json::json!([]),
+            serde_json::json!([1, 2, 3, 4]),
+            serde_json::json!({"input": 1}),
+            serde_json::json!({"input": 1, "output": 2, "cache_read": 3, "cache_write": 4, "future": 5}),
+            serde_json::json!({"input": -1, "output": 2, "cache_read": 3, "cache_write": 4}),
+            serde_json::json!({"input": 1.5, "output": 2, "cache_read": 3, "cache_write": 4}),
+            serde_json::json!({"usage": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}),
+        ] {
+            let custom = Custom {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                kind: "kage:rejected_usage".into(),
+                data,
+            };
+            let raw = serde_json::json!({"type": "custom", "id": custom.id, "ts": custom.ts, "kind": custom.kind, "data": custom.data});
+            assert!(serde_json::from_value::<SessionEntry>(raw).is_err());
+            assert!(RejectedUsage::from_custom(&custom).is_err());
+            assert!(serde_json::to_string(&custom).is_err());
+        }
+    }
+
+    #[test]
+    fn rejected_usage_rejects_duplicate_fields_in_raw_json() {
+        let id = EntryId::new();
+        let ts = Utc::now();
+        for data in [
+            r#"{"input":1,"input":2,"output":2,"cache_read":3,"cache_write":4}"#,
+            r#"{"input":1,"in\u0070ut":2,"output":2,"cache_read":3,"cache_write":4}"#,
+        ] {
+            for data_first in [true, false] {
+                let fields = if data_first {
+                    format!(r#""data":{data},"kind":"kage:rejected_usage""#)
+                } else {
+                    format!(r#""kind":"kage:rejected_usage","data":{data}"#)
+                };
+                let raw = format!(r#"{{"type":"custom","id":"{id}","ts":"{ts}",{fields}}}"#);
+                assert!(serde_json::from_str::<SessionEntry>(&raw).is_err(), "{raw}");
+            }
+        }
     }
 
     #[test]

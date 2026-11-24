@@ -10393,6 +10393,13 @@ fn provider_retry_rolls_back_only_provisional_tool_ids() {
             },
         );
         bridge_event(&mut bridge, h.id, tool("reused"));
+        bridge_event(
+            &mut bridge,
+            h.id,
+            LoopEvent::RejectedUsage {
+                usage: usage(137_000, 300),
+            },
+        );
         bridge_event(&mut bridge, h.id, end(MessageId::new()));
         assert_eq!(bridge.attempts[&h.id].id, failed);
         bridge_event(&mut bridge, h.id, retry_event());
@@ -10504,6 +10511,15 @@ fn retry_clears_the_live_flight_before_an_attach_during_backoff() {
             event: event.into(),
         });
     }
+    assert_eq!(live.snapshot(h.id).flight.len(), 4);
+    live.observe(&kage_core::protocol::Envelope {
+        session: h.id,
+        seq: 0,
+        event: LoopEvent::RejectedUsage {
+            usage: usage(137_000, 300),
+        }
+        .into(),
+    });
     assert_eq!(live.snapshot(h.id).flight.len(), 4);
     live.observe(&kage_core::protocol::Envelope {
         session: h.id,

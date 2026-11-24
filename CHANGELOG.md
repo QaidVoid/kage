@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Upgrade Notes
+
+- Empty, whitespace-only, and reasoning-only provider turns no longer end
+  runs successfully. Normal endings and tool-use endings retry within
+  `loop.max_provider_retries`; unusable responses stopped for other reasons
+  fail without retrying. This also applies to empty endings after tool
+  results. Reported rejected-attempt token usage is retained on resume.
+
 ## [0.7.0](https://github.com/QaidVoid/kage/compare/v0.6.0...v0.7.0) - 2026-11-24
 
 ### Features

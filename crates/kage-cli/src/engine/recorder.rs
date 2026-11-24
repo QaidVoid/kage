@@ -7,11 +7,11 @@ use chrono::Utc;
 use kage_core::{LoopEvent, Message, Role, TokenUsage};
 use kage_plugin::{PendingSessionOp, session_plugins::SessionPlugins};
 use kage_session::{
-    Compaction, Custom, EntryId, Header, Label, MessageEntry, ModelChange, SessionEntry,
-    SessionError, SessionWriter,
+    Compaction, Custom, EntryId, Header, Label, MessageEntry, ModelChange, RejectedUsage,
+    SessionEntry, SessionError, SessionWriter,
 };
 
-/// Writes every appended message and compaction of one session.
+/// Writes appended messages, compactions, and rejected-attempt usage for one session.
 ///
 /// Assistant messages carry the usage of the `MessageEnd` that preceded
 /// them. Plugin session operations queued during a turn are written when
@@ -107,8 +107,12 @@ impl Recorder {
         }
     }
 
+    /// Persist durable events, keeping rejected usage separate from message usage.
     pub(crate) fn observe(&mut self, event: &LoopEvent) -> Result<(), SessionError> {
         match event {
+            LoopEvent::RejectedUsage { usage } => self
+                .writer()?
+                .append(&RejectedUsage { usage: *usage }.into_entry(EntryId::new(), Utc::now())),
             LoopEvent::MessageEnd { usage, .. } => {
                 self.turn_usage = Some(*usage);
                 Ok(())
@@ -287,6 +291,46 @@ mod tests {
             .collect();
         assert_eq!(usages, [None, Some(usage)]);
         assert!(matches!(written.last(), Some(SessionEntry::Compaction(_))));
+    }
+
+    #[test]
+    fn rejected_usage_is_recorded_without_becoming_assistant_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, header) = header(dir.path());
+        let mut recorder = Recorder::planned(path.clone(), header, None);
+        let usage = TokenUsage {
+            input: 7,
+            output: 3,
+            cache_read: 11,
+            cache_write: 13,
+        };
+        recorder.observe(&appended(Role::User, "q")).unwrap();
+        recorder
+            .observe(&LoopEvent::RejectedUsage { usage })
+            .unwrap();
+
+        let written = entries(&path);
+        assert_eq!(written.len(), 3);
+        let SessionEntry::Custom(custom) = &written[2] else {
+            panic!("rejected usage must be an accounting entry");
+        };
+        assert_eq!(
+            RejectedUsage::from_custom(custom).unwrap().unwrap().usage,
+            usage
+        );
+        let replay = kage_session::replay(&path).unwrap();
+        assert_eq!(replay.history.len(), 1);
+        assert_eq!(replay.usage_total.input, usage.input);
+        assert_eq!(replay.usage_total.output, usage.output);
+        assert_eq!(replay.usage_total.cache_read, usage.cache_read);
+        assert_eq!(replay.usage_total.cache_write, usage.cache_write);
+        assert_eq!(replay.usage_total.last_context, 0);
+
+        recorder.observe(&appended(Role::Assistant, "a")).unwrap();
+        assert!(matches!(
+            entries(&path).last(),
+            Some(SessionEntry::Message(message)) if message.usage.is_none()
+        ));
     }
 
     #[test]

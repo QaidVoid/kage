@@ -11,6 +11,7 @@ use super::*;
 use crate::NoopHooks;
 use crate::test_support::{Meet, MeetTool};
 
+mod empty_turns;
 mod tool_pairs;
 
 /// Portable absolute workdir for loop tests, unique per test name. A
@@ -318,16 +319,7 @@ fn shell_returns_after_provider_emits_text_only_turn() {
 
 #[test]
 fn shell_re_enters_inner_loop_on_followup() {
-    let mock = MockProvider::sequence(vec![
-        vec![Ok(ProviderEvent::MessageEnd {
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-        })],
-        vec![Ok(ProviderEvent::MessageEnd {
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-        })],
-    ]);
+    let mock = MockProvider::sequence(vec![good_turn(), good_turn()]);
 
     let mut cx = AgentContext::new("mock:m", "");
     cx.history.push(Arc::new(user_msg("hi")));
@@ -343,10 +335,7 @@ fn shell_re_enters_inner_loop_on_followup() {
 
 #[test]
 fn shell_emits_steering_message_before_first_turn() {
-    let mock = MockProvider::replaying(vec![Ok(ProviderEvent::MessageEnd {
-        stop_reason: StopReason::EndTurn,
-        usage: TokenUsage::default(),
-    })]);
+    let mock = MockProvider::replaying(good_turn());
 
     let mut cx = AgentContext::new("mock:m", "");
     cx.history.push(Arc::new(user_msg("hi")));
@@ -411,16 +400,7 @@ fn turn_boundaries_fire_once_for_text_only_turn() {
 
 #[test]
 fn turn_index_advances_across_followup_rounds() {
-    let mock = MockProvider::sequence(vec![
-        vec![Ok(ProviderEvent::MessageEnd {
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-        })],
-        vec![Ok(ProviderEvent::MessageEnd {
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-        })],
-    ]);
+    let mock = MockProvider::sequence(vec![good_turn(), good_turn()]);
 
     let mut cx = AgentContext::new("mock:m", "");
     cx.history.push(Arc::new(user_msg("hi")));
@@ -463,10 +443,7 @@ impl Hooks for StaticTransform {
 
 #[test]
 fn transform_context_runs_before_each_provider_call() {
-    let mock = MockProvider::replaying(vec![Ok(ProviderEvent::MessageEnd {
-        stop_reason: StopReason::EndTurn,
-        usage: TokenUsage::default(),
-    })]);
+    let mock = MockProvider::replaying(good_turn());
     let mut cx = AgentContext::new("mock:m", "");
     cx.history.push(Arc::new(user_msg("hello")));
     let cfg = LoopConfig::default();
@@ -539,10 +516,7 @@ impl Hooks for StopAfterFirstTurn {
 
 #[test]
 fn should_stop_after_turn_suppresses_followup_and_returns_ok() {
-    let mock = MockProvider::replaying(vec![Ok(ProviderEvent::MessageEnd {
-        stop_reason: StopReason::EndTurn,
-        usage: TokenUsage::default(),
-    })]);
+    let mock = MockProvider::replaying(good_turn());
     let mut cx = AgentContext::new("mock:m", "");
     cx.history.push(Arc::new(user_msg("hi")));
     let cfg = LoopConfig::default();
@@ -668,16 +642,7 @@ impl Hooks for CombinedSteering {
 
 #[test]
 fn steering_one_at_a_time_drains_one_per_turn() {
-    let mock = MockProvider::sequence(vec![
-        vec![Ok(ProviderEvent::MessageEnd {
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-        })],
-        vec![Ok(ProviderEvent::MessageEnd {
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-        })],
-    ]);
+    let mock = MockProvider::sequence(vec![good_turn(), good_turn()]);
 
     let mut cx = AgentContext::new("mock:m", "");
     cx.history.push(Arc::new(user_msg("hi")));
@@ -705,10 +670,7 @@ fn steering_one_at_a_time_drains_one_per_turn() {
 
 #[test]
 fn steering_all_mode_concatenates_in_one_turn() {
-    let mock = MockProvider::replaying(vec![Ok(ProviderEvent::MessageEnd {
-        stop_reason: StopReason::EndTurn,
-        usage: TokenUsage::default(),
-    })]);
+    let mock = MockProvider::replaying(good_turn());
 
     let mut cx = AgentContext::new("mock:m", "");
     cx.history.push(Arc::new(user_msg("hi")));
@@ -753,10 +715,7 @@ impl Hooks for RequestSpy {
 
 #[test]
 fn transform_provider_request_observes_and_can_rewrite() {
-    let mock = MockProvider::replaying(vec![Ok(ProviderEvent::MessageEnd {
-        stop_reason: StopReason::EndTurn,
-        usage: TokenUsage::default(),
-    })]);
+    let mock = MockProvider::replaying(good_turn());
     let mut cx = AgentContext::new("mock:m", "");
     cx.history.push(Arc::new(user_msg("hi")));
     let cfg = LoopConfig::default();
@@ -797,17 +756,11 @@ fn tool_call_turn(names: &[&str]) -> Vec<Result<ProviderEvent, kage_provider::Pr
     events
 }
 
-/// Run one turn calling `tools` in order, then an empty final turn,
+/// Run one turn calling `tools` in order, then a valid final turn,
 /// and return the tool result texts in call order.
 fn run_meet_batch(tools: Vec<MeetTool>, parallel_tools: bool) -> Vec<String> {
     let names: Vec<&str> = tools.iter().map(|t| t.name).collect();
-    let mock = MockProvider::sequence(vec![
-        tool_call_turn(&names),
-        vec![Ok(ProviderEvent::MessageEnd {
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-        })],
-    ]);
+    let mock = MockProvider::sequence(vec![tool_call_turn(&names), good_turn()]);
     let mut cx = AgentContext::new("mock:m", "");
     cx.history.push(Arc::new(user_msg("go")));
     let cfg = LoopConfig {
@@ -1048,16 +1001,7 @@ impl kage_tools::Tool for StaticTool {
 
 #[test]
 fn followup_text_appears_in_next_provider_request() {
-    let mock = MockProvider::sequence(vec![
-        vec![Ok(ProviderEvent::MessageEnd {
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-        })],
-        vec![Ok(ProviderEvent::MessageEnd {
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-        })],
-    ]);
+    let mock = MockProvider::sequence(vec![good_turn(), good_turn()]);
 
     let mut cx = AgentContext::new("mock:m", "").with_workdir(temp_workdir("followup_text"));
     cx.history.push(Arc::new(user_msg("first ask")));
@@ -1101,10 +1045,7 @@ fn steering_is_polled_before_every_inner_turn() {
                 usage: TokenUsage::default(),
             }),
         ],
-        vec![Ok(ProviderEvent::MessageEnd {
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-        })],
+        good_turn(),
     ]);
 
     let mut cx = AgentContext::new("mock:m", "").with_workdir(temp_workdir("steering_poll"));
@@ -1309,15 +1250,7 @@ fn on_doom_loop_hook_can_suppress_steering() {
             }),
         ]
     };
-    let mock = MockProvider::sequence(vec![
-        make_turn(),
-        make_turn(),
-        make_turn(),
-        vec![Ok(ProviderEvent::MessageEnd {
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-        })],
-    ]);
+    let mock = MockProvider::sequence(vec![make_turn(), make_turn(), make_turn(), good_turn()]);
 
     let mut cx = AgentContext::new("mock:m", "").with_workdir(temp_workdir("doom_suppress"));
     cx.history.push(Arc::new(user_msg("try the thing")));
@@ -2443,10 +2376,7 @@ fn run_rejects_a_relative_workdir_instead_of_silently_using_it() {
 
 #[test]
 fn an_absolute_workdir_runs_normally() {
-    let mock = MockProvider::replaying(vec![Ok(ProviderEvent::MessageEnd {
-        stop_reason: StopReason::EndTurn,
-        usage: TokenUsage::default(),
-    })]);
+    let mock = MockProvider::replaying(good_turn());
     let mut cx = AgentContext::new("mock:m", "").with_workdir(temp_workdir("absolute"));
     cx.history.push(Arc::new(user_msg("hi")));
 

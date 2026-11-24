@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use kage_core::protocol::{CompactionRecord, TimelineItem};
-use kage_core::{Content, Message, MessageId, Role};
+use kage_core::{Content, Message, MessageId, Role, TokenUsage};
 
 use crate::entry::{Compaction, Header, MessageEntry, SessionEntry};
 use crate::error::SessionError;
@@ -47,10 +47,9 @@ pub struct ReplayResult {
     /// the `ToolCallId` as a string; value is milliseconds from the
     /// call's `MessageEntry.ts` to the matching result's `ts`.
     pub tool_durations: HashMap<String, u64>,
-    /// Sum of every persisted
-    /// [`MessageEntry::usage`](crate::MessageEntry::usage) across the
-    /// session, post-compaction. Returned as four scalars instead of
-    /// a `TokenUsage` to keep this crate's public surface free of
+    /// Sum of persisted message usage and [`crate::RejectedUsage`] on the
+    /// active chain, including usage preceding compactions. Returned as four
+    /// scalars instead of a `TokenUsage` to keep this crate's public surface free of
     /// `kage-core` types in result-only positions; the host folds it
     /// into `AgentContext::budget` on resume.
     pub usage_total: ReplayUsage,
@@ -91,22 +90,31 @@ impl ReplayResult {
 }
 
 /// Cumulative token totals replayed from a session file, plus the
-/// most recent turn's full prompt size for context-fill display.
+/// most recent accepted turn's full prompt size for context-fill display.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReplayUsage {
-    /// Sum of `usage.input` across all assistant turns.
+    /// Sum of `usage.input` across accepted and rejected assistant responses.
     pub input: u64,
-    /// Sum of `usage.output` across all assistant turns.
+    /// Sum of `usage.output` across accepted and rejected assistant responses.
     pub output: u64,
-    /// Sum of `usage.cache_read` across all assistant turns.
+    /// Sum of `usage.cache_read` across accepted and rejected assistant responses.
     pub cache_read: u64,
-    /// Sum of `usage.cache_write` across all assistant turns.
+    /// Sum of `usage.cache_write` across accepted and rejected assistant responses.
     pub cache_write: u64,
     /// Sum of `input + output + cache_read + cache_write` of the
-    /// last assistant turn that recorded usage. Compared to the
+    /// last accepted assistant turn that recorded usage. Compared to the
     /// model's context window for the modeline percentage on
     /// resume; `0` until a turn with usage is found.
     pub last_context: u64,
+}
+
+impl ReplayUsage {
+    fn add(&mut self, usage: TokenUsage) {
+        self.input = self.input.saturating_add(usage.input);
+        self.output = self.output.saturating_add(usage.output);
+        self.cache_read = self.cache_read.saturating_add(usage.cache_read);
+        self.cache_write = self.cache_write.saturating_add(usage.cache_write);
+    }
 }
 
 /// `message` with each tool result cut to the size a live run keeps.
@@ -222,10 +230,7 @@ pub fn replay_tree(path: &Path, tree: SessionTree) -> Result<ReplayResult, Sessi
             SessionEntry::Header(_) | SessionEntry::Branch(_) | SessionEntry::Label(_) => {}
             SessionEntry::Message(m) => {
                 if let Some(u) = m.usage {
-                    usage_total.input = usage_total.input.saturating_add(u.input);
-                    usage_total.output = usage_total.output.saturating_add(u.output);
-                    usage_total.cache_read = usage_total.cache_read.saturating_add(u.cache_read);
-                    usage_total.cache_write = usage_total.cache_write.saturating_add(u.cache_write);
+                    usage_total.add(u);
                     let fill = u
                         .input
                         .saturating_add(u.output)
@@ -268,7 +273,17 @@ pub fn replay_tree(path: &Path, tree: SessionTree) -> Result<ReplayResult, Sessi
             SessionEntry::ModelChange(mc) => model = kage_core::canonical_model(&mc.model),
             SessionEntry::ThinkingLevelChange(t) => thinking_level = Some(t.level),
             SessionEntry::Title(t) => title = Some(t.title),
-            SessionEntry::Custom(c) => read_mode(&c, &mut swarm_mode, &mut plan_mode),
+            SessionEntry::Custom(c) => {
+                let rejected =
+                    crate::RejectedUsage::from_custom(&c).map_err(|source| SessionError::Io {
+                        path: path.to_path_buf(),
+                        source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+                    })?;
+                if let Some(rejected) = rejected {
+                    usage_total.add(rejected.usage);
+                }
+                read_mode(&c, &mut swarm_mode, &mut plan_mode);
+            }
         }
     }
     Ok(ReplayResult {
@@ -474,6 +489,300 @@ mod tests {
         for e in entries {
             w.append(e).unwrap();
         }
+    }
+
+    #[test]
+    fn rejected_usage_only_replays_totals_without_completion() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rejected.jsonl");
+        write(
+            &path,
+            fresh_header(),
+            &[SessionEntry::Custom(Custom {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                kind: "kage:rejected_usage".into(),
+                data: serde_json::json!({"input": 11, "output": 7, "cache_read": 5, "cache_write": 3}),
+            })],
+        );
+        let result = replay(&path).unwrap();
+        assert_eq!(
+            result.usage_total,
+            ReplayUsage {
+                input: 11,
+                output: 7,
+                cache_read: 5,
+                cache_write: 3,
+                last_context: 0,
+            }
+        );
+        assert!(result.history.is_empty());
+        assert!(result.timeline.is_empty());
+    }
+
+    #[test]
+    fn rejected_usage_preserves_context_history_and_pending_compaction() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rejected.jsonl");
+        let usage = TokenUsage {
+            input: 11,
+            output: 7,
+            cache_read: 5,
+            cache_write: 3,
+        };
+        let mut accepted = message_entry(Role::Assistant, "accepted");
+        let SessionEntry::Message(ref mut message) = accepted else {
+            panic!();
+        };
+        message.usage = Some(usage);
+        write(
+            &path,
+            fresh_header(),
+            &[
+                message_entry(Role::User, "question"),
+                accepted.clone(),
+                SessionEntry::Compaction(Compaction {
+                    id: EntryId::new(),
+                    ts: Utc::now(),
+                    summarized: 1,
+                    kept: 1,
+                    summary: "summary".into(),
+                    before: Some(100),
+                }),
+            ],
+        );
+        let history = |result: &ReplayResult| {
+            result
+                .history
+                .iter()
+                .map(|message| {
+                    (
+                        message.role,
+                        message.content.clone(),
+                        message.parent,
+                        message.ts,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = replay(&path).unwrap();
+        let mut writer = SessionWriter::open(&path).unwrap();
+        writer
+            .append(&crate::RejectedUsage { usage }.into_entry(EntryId::new(), Utc::now()))
+            .unwrap();
+        let after = replay(&path).unwrap();
+        assert_eq!(history(&after), history(&before));
+        assert_eq!(after.timeline, before.timeline);
+        assert_eq!(
+            after.usage_total,
+            ReplayUsage {
+                input: 22,
+                output: 14,
+                cache_read: 10,
+                cache_write: 6,
+                last_context: 26,
+            }
+        );
+        let SessionEntry::Message(ref mut message) = accepted else {
+            panic!();
+        };
+        message.id = EntryId::new();
+        writer.append(&accepted).unwrap();
+        let before = replay(&path).unwrap();
+        let card = before
+            .timeline
+            .iter()
+            .find_map(|item| match item {
+                TimelineItem::Compaction(card) => Some(card),
+                TimelineItem::Message(_) => None,
+            })
+            .unwrap();
+        assert_eq!(card.after, Some(26));
+        writer
+            .append(
+                &crate::RejectedUsage {
+                    usage: TokenUsage {
+                        input: 1000,
+                        ..usage
+                    },
+                }
+                .into_entry(EntryId::new(), Utc::now()),
+            )
+            .unwrap();
+        let after = replay(&path).unwrap();
+        assert_eq!(history(&after), history(&before));
+        assert_eq!(after.timeline, before.timeline);
+        assert_eq!(
+            after.usage_total,
+            ReplayUsage {
+                input: 1033,
+                output: 28,
+                cache_read: 20,
+                cache_write: 12,
+                last_context: 26,
+            }
+        );
+    }
+
+    #[test]
+    fn rejected_usage_malformed_records_fail_write_read_and_reopen() {
+        use std::io::Write;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("malformed.jsonl");
+        let custom = Custom {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            kind: "kage:rejected_usage".into(),
+            data: serde_json::json!({"input": 1}),
+        };
+        let mut writer = SessionWriter::create(&path, fresh_header()).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            writer.append(&SessionEntry::Custom(custom.clone())),
+            Err(SessionError::Encode { .. })
+        ));
+        drop(writer);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let raw = serde_json::json!({
+            "type": "custom", "id": custom.id, "ts": custom.ts,
+            "kind": custom.kind, "data": custom.data,
+        });
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(file, "{raw}").unwrap();
+        drop(file);
+        let malformed = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            replay(&path),
+            Err(SessionError::Decode { line: 2, .. })
+        ));
+        assert!(matches!(
+            SessionWriter::open_native_replay(&path),
+            Err(SessionError::Decode { line: 2, .. })
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), malformed);
+    }
+
+    #[test]
+    fn rejected_usage_totals_saturate_without_context_fill() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("saturated.jsonl");
+        let usage = TokenUsage {
+            input: u64::MAX,
+            output: u64::MAX,
+            cache_read: u64::MAX,
+            cache_write: u64::MAX,
+        };
+        write(
+            &path,
+            fresh_header(),
+            &[
+                crate::RejectedUsage { usage }.into_entry(EntryId::new(), Utc::now()),
+                crate::RejectedUsage { usage }.into_entry(EntryId::new(), Utc::now()),
+            ],
+        );
+        assert_eq!(
+            replay(&path).unwrap().usage_total,
+            ReplayUsage {
+                input: u64::MAX,
+                output: u64::MAX,
+                cache_read: u64::MAX,
+                cache_write: u64::MAX,
+                last_context: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn rejected_usage_survives_branch_fork_copy_and_locked_reopen() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("source.jsonl");
+        let rejected = |input| {
+            crate::RejectedUsage {
+                usage: TokenUsage {
+                    input,
+                    output: input * 2,
+                    cache_read: input * 3,
+                    cache_write: input * 4,
+                },
+            }
+            .into_entry(EntryId::new(), Utc::now())
+        };
+        let first = rejected(10);
+        let abandoned = rejected(100);
+        let head = rejected(1);
+        write(
+            &path,
+            fresh_header(),
+            &[
+                message_entry(Role::User, "question"),
+                first.clone(),
+                abandoned.clone(),
+                SessionEntry::Branch(crate::BranchEntry {
+                    id: EntryId::new(),
+                    ts: Utc::now(),
+                    at: first.id(),
+                }),
+                head.clone(),
+            ],
+        );
+        let expected = ReplayUsage {
+            input: 11,
+            output: 22,
+            cache_read: 33,
+            cache_write: 44,
+            last_context: 0,
+        };
+        let tree = SessionTree::read(&path).unwrap();
+        assert!(tree.contains(abandoned.id()));
+        assert_eq!(replay_tree(&path, tree).unwrap().usage_total, expected);
+        let forked = dir.path().join("forked.jsonl");
+        assert!(!crate::fork(&path, &forked, SessionId::new(), head.id()).unwrap());
+        let original = replay(&path).unwrap();
+        let forked_result = replay(&forked).unwrap();
+        assert_eq!(forked_result.usage_total, expected);
+        assert_eq!(forked_result.history, original.history);
+        assert_eq!(forked_result.timeline, original.timeline);
+        let entries: Vec<_> = crate::SessionReader::iter(&forked)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(entries.iter().any(|entry| entry == &first));
+        assert!(entries.iter().any(|entry| entry == &head));
+        assert!(!entries.iter().any(|entry| entry.id() == abandoned.id()));
+        let alternate = dir.path().join("alternate.jsonl");
+        crate::fork(&path, &alternate, SessionId::new(), abandoned.id()).unwrap();
+        assert_eq!(
+            replay(&alternate).unwrap().usage_total,
+            ReplayUsage {
+                input: 110,
+                output: 220,
+                cache_read: 330,
+                cache_write: 440,
+                last_context: 0,
+            }
+        );
+        let copied = dir.path().join("copy.jsonl");
+        std::fs::copy(&forked, &copied).unwrap();
+        let (mut writer, reopened) = SessionWriter::open_native_replay(&copied).unwrap().unwrap();
+        assert_eq!(reopened.usage_total, expected);
+        assert_eq!(reopened.history, original.history);
+        writer.append(&rejected(1)).unwrap();
+        drop(writer);
+        assert_eq!(
+            replay(&copied).unwrap().usage_total,
+            ReplayUsage {
+                input: 12,
+                output: 24,
+                cache_read: 36,
+                cache_write: 48,
+                last_context: 0,
+            }
+        );
+        assert_eq!(replay(&forked).unwrap().usage_total, expected);
     }
 
     #[test]

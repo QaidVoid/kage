@@ -249,8 +249,14 @@ impl Run {
             {
                 notice(&bus, session, format!("session write failed: {err}"));
             }
-            let turn_usage = match &event {
-                LoopEvent::MessageEnd { usage, .. } => Some(*usage),
+            let attempt_usage = match &event {
+                LoopEvent::MessageEnd { usage: turn, .. } => {
+                    usage.context_used =
+                        turn.input + turn.output + turn.cache_read + turn.cache_write;
+                    usage.context_estimated = false;
+                    Some(*turn)
+                }
+                LoopEvent::RejectedUsage { usage } => Some(*usage),
                 _ => None,
             };
             let compacted = match &event {
@@ -263,8 +269,8 @@ impl Run {
                 usage.context_estimated = true;
                 bus.publish(session, HostEvent::UsageUpdated { usage });
             }
-            if let Some(turn) = turn_usage {
-                add_turn(&mut usage, &turn, price);
+            if let Some(turn) = attempt_usage {
+                add_usage(&mut usage, &turn, price);
                 bus.publish(session, HostEvent::UsageUpdated { usage });
                 if let Some(budget) = &limits.budget
                     && budget.add(turn.input + turn.output)
@@ -420,16 +426,14 @@ fn notice(bus: &Bus, session: SessionId, text: String) {
     );
 }
 
-/// Fold one turn's usage into the session totals, priced at `price`
-/// when the model has a known price.
-fn add_turn(usage: &mut Usage, turn: &TokenUsage, price: Option<ModelCost>) {
+/// Fold an attempt's usage into the session totals, priced at `price`
+/// when the model has a known price, without changing the context estimate.
+fn add_usage(usage: &mut Usage, turn: &TokenUsage, price: Option<ModelCost>) {
     let total = &mut usage.total;
     total.input += turn.input;
     total.output += turn.output;
     total.cache_read += turn.cache_read;
     total.cache_write += turn.cache_write;
-    usage.context_used = turn.input + turn.output + turn.cache_read + turn.cache_write;
-    usage.context_estimated = false;
     if let Some(rate) = price {
         usage.cost += TokenCost::from_usage(
             turn,
@@ -511,5 +515,120 @@ impl Hooks for RunHooks {
 
     fn get_followup(&mut self) -> Option<String> {
         self.drain_inbox()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use kage_core::StopReason;
+    use kage_core::permissions::PermissionsConfig;
+    use kage_core::protocol::Event;
+    use kage_provider::ProviderEvent;
+    use kage_provider::testing::MockProvider;
+
+    use super::*;
+
+    #[test]
+    fn rejected_usage_preserves_estimates_and_counts_shared_budget_once() {
+        let spend = Arc::new(Spend::default());
+        let root = SessionId::new();
+        let bus = Arc::new(Bus::new());
+        let (events_tx, events) = mpsc::channel();
+        bus.subscribe(Box::new(move |envelope| {
+            events_tx.send(envelope.clone()).unwrap();
+        }));
+        let (done, inputs) = mpsc::channel();
+        let mut usage = Usage {
+            context_used: 57,
+            context_estimated: true,
+            ..Usage::default()
+        };
+        for (index, stop_reason) in [
+            StopReason::EndTurn,
+            StopReason::MaxTokens,
+            StopReason::EndTurn,
+            StopReason::EndTurn,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let valid = index == 2;
+            let tokens = TokenUsage {
+                input: 7,
+                output: 3,
+                cache_read: 11,
+                cache_write: 13,
+            };
+            let delta = if valid {
+                ProviderEvent::TextDelta { delta: "ok".into() }
+            } else {
+                ProviderEvent::ThinkingDelta {
+                    delta: "thinking".into(),
+                }
+            };
+            let run = Run {
+                session: SessionId::new(),
+                work: Work::Prompt(kage_provider::testing::user_msg("hi")),
+                provider: Arc::new(MockProvider::replaying(vec![
+                    Ok(ProviderEvent::MessageStart),
+                    Ok(delta),
+                    Ok(ProviderEvent::MessageEnd {
+                        stop_reason,
+                        usage: tokens,
+                    }),
+                ])),
+                tools: ToolRegistry::new(),
+                cx: AgentContext::new("m", ""),
+                recorder: None,
+                usage,
+                loop_cfg: LoopConfig {
+                    max_provider_retries: u32::from(stop_reason == StopReason::MaxTokens),
+                    ..LoopConfig::default()
+                },
+                cancel: CancelFlag::new(),
+                gate: PermissionGate::new(PermissionsConfig::default()),
+                steering: Arc::new(Mutex::new(VecDeque::new())),
+                inbox: Arc::new(Mutex::new(VecDeque::new())),
+                plugins: None,
+                mcp: None,
+                bus: Arc::clone(&bus),
+                limits: Limits {
+                    budget: Some(Budget {
+                        spend: Arc::clone(&spend),
+                        tokens: 30,
+                        root,
+                    }),
+                    ..Limits::default()
+                },
+                worktree: None,
+            };
+            let finished = run.execute(&done);
+            assert_eq!(finished.outcome == RunOutcome::Completed, valid);
+            usage = finished.usage;
+            assert_eq!(
+                spend.tokens.load(Ordering::Relaxed),
+                10 * (index as u64 + 1)
+            );
+            assert_eq!(spend.is_spent(), index >= 2);
+            assert_eq!(usage.context_used, if index < 2 { 57 } else { 34 });
+            assert_eq!(usage.context_estimated, index < 2);
+            let updates: Vec<_> = events
+                .try_iter()
+                .filter_map(|envelope| match envelope.event {
+                    Event::Host(HostEvent::UsageUpdated { usage }) => Some(usage),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(updates, [usage]);
+            let notifications: Vec<_> = inputs.try_iter().collect();
+            assert_eq!(notifications.len(), usize::from(index == 2));
+            if let Some(notification) = notifications.first() {
+                assert!(matches!(notification, Input::BudgetSpent { root: id } if *id == root));
+            }
+        }
+        assert_eq!(usage.total.input, 28);
+        assert_eq!(usage.total.output, 12);
+        assert_eq!(usage.total.cache_read, 44);
+        assert_eq!(usage.total.cache_write, 52);
     }
 }

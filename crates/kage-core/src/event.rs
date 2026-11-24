@@ -386,6 +386,14 @@ pub enum LoopEvent {
         #[serde(default)]
         stop_reason: StopReason,
     },
+    /// Usage charged for a rejected provider response. Durable.
+    ///
+    /// Accounting only: this does not complete an assistant message, append
+    /// history, update context fill, or finish a pending compaction card.
+    RejectedUsage {
+        /// Token usage reported for the rejected response.
+        usage: TokenUsage,
+    },
     /// A message was appended to the conversation history: the initial
     /// prompt, a steered or follow-up prompt, an assistant reply, or a
     /// tool result. Recording these in order reproduces the history
@@ -513,6 +521,22 @@ mod tests {
         let s = serde_json::to_string(&ev).unwrap();
         let back: LoopEvent = serde_json::from_str(&s).unwrap();
         assert_eq!(ev, back);
+    }
+
+    #[test]
+    fn rejected_usage_roundtrips_without_message_identity() {
+        let event = LoopEvent::RejectedUsage {
+            usage: TokenUsage {
+                input: 11,
+                output: 7,
+                cache_read: 5,
+                cache_write: 3,
+            },
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["type"], "rejected_usage");
+        assert!(value.get("id").is_none());
+        assert_eq!(serde_json::from_value::<LoopEvent>(value).unwrap(), event);
     }
 
     #[test]

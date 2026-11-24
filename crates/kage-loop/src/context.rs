@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 
 /// Running token totals consumed and produced over the life of an agent run.
 ///
-/// Updated after every assistant turn from the provider-reported [`TokenUsage`].
+/// Updated from accepted and rejected provider responses that report [`TokenUsage`].
 /// The cumulative `used_*` fields are session-wide sums for cost and audit
-/// purposes; [`Self::current_context`] is the most recent turn's
+/// purposes; [`Self::current_context`] is the most recent accepted turn's
 /// `input + output + cache_read + cache_write` and is what the compaction
 /// threshold and the modeline percentage compare against the model's
 /// context window. The two are different because each turn's prompt
@@ -28,7 +28,7 @@ pub struct TokenBudget {
     pub used_cache_read: u64,
     /// Cumulative cache-write tokens.
     pub used_cache_write: u64,
-    /// Approximate active-context fill from the most recent turn:
+    /// Approximate active-context fill from the most recent accepted turn:
     /// `input + output + cache_read + cache_write` of that single
     /// turn. Compaction and the modeline percentage compare this to
     /// the model's context window.
@@ -45,15 +45,21 @@ impl TokenBudget {
     /// Fold one turn's [`TokenUsage`] into the running totals and
     /// snapshot the per-turn context fill into [`Self::current_context`].
     pub fn add(&mut self, usage: TokenUsage) {
-        self.used_input = self.used_input.saturating_add(usage.input);
-        self.used_output = self.used_output.saturating_add(usage.output);
-        self.used_cache_read = self.used_cache_read.saturating_add(usage.cache_read);
-        self.used_cache_write = self.used_cache_write.saturating_add(usage.cache_write);
+        self.add_rejected(usage);
         self.current_context = usage
             .input
             .saturating_add(usage.output)
             .saturating_add(usage.cache_read)
             .saturating_add(usage.cache_write);
+    }
+
+    /// Charge a rejected attempt without changing the accepted-history
+    /// context estimate used to build the next request.
+    pub fn add_rejected(&mut self, usage: TokenUsage) {
+        self.used_input = self.used_input.saturating_add(usage.input);
+        self.used_output = self.used_output.saturating_add(usage.output);
+        self.used_cache_read = self.used_cache_read.saturating_add(usage.cache_read);
+        self.used_cache_write = self.used_cache_write.saturating_add(usage.cache_write);
     }
 }
 
@@ -259,6 +265,28 @@ mod tests {
             cache_write: 0,
         });
         assert_eq!(b.used_input, u64::MAX);
+    }
+
+    #[test]
+    fn rejected_usage_saturates_spend_without_replacing_context() {
+        let mut budget = TokenBudget {
+            used_input: u64::MAX - 1,
+            used_output: u64::MAX - 1,
+            used_cache_read: u64::MAX - 1,
+            used_cache_write: u64::MAX - 1,
+            current_context: 57,
+        };
+        budget.add_rejected(TokenUsage {
+            input: 7,
+            output: 3,
+            cache_read: 11,
+            cache_write: 13,
+        });
+        assert_eq!(budget.used_input, u64::MAX);
+        assert_eq!(budget.used_output, u64::MAX);
+        assert_eq!(budget.used_cache_read, u64::MAX);
+        assert_eq!(budget.used_cache_write, u64::MAX);
+        assert_eq!(budget.current_context, 57);
     }
 
     #[test]

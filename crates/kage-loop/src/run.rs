@@ -173,7 +173,13 @@ where
                         return Err(kind);
                     }
                     let parent = cx.history.last().map(|m| m.id);
-                    match stream_one_attempt(provider, req, parent, cancel, &mut emit) {
+                    let result = stream_one_attempt(provider, req, parent, cancel, &mut |event| {
+                        if let LoopEvent::RejectedUsage { usage } = &event {
+                            cx.budget.add_rejected(*usage);
+                        }
+                        emit(event);
+                    });
+                    match result {
                         Ok(t) => break t,
                         Err(TurnFailure::Fatal(kind)) => {
                             emit(LoopEvent::Error { kind: kind.clone() });

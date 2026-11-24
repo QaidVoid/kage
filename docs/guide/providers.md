@@ -507,6 +507,29 @@ without thinking.
 Custom providers of `kind = "anthropic"` or `"gemini"` follow the
 same rules.
 
+## incomplete responses
+
+In native sessions, a provider turn must contain non-whitespace text,
+an image or audio clip, or a completed structured tool call. A response
+containing only thinking, whitespace, or no content is not treated as a
+completed run. kage never
+reconstructs executable tool calls from text in the thinking channel.
+
+If such a response reports a normal end or tool use, kage retries through
+`[loop] max_provider_retries`, which defaults to four retries. Rejected
+attempts do not enter conversation history. If retries are disabled or
+exhausted, the run fails visibly. An unusable response stopped by an output
+limit, a stop sequence, or an unknown reason fails without an identical
+request retry. Visible refusal text and media-only responses remain valid.
+
+Reported usage from rejected attempts still counts toward token totals,
+known model costs, and agent limits. Reopening the session retains those
+token totals without treating discarded output as active context.
+
+Some providers legitimately return an empty final response after tool
+results. The same strict completion policy applies, so those responses
+can exhaust retries even when an earlier turn already contained an answer.
+
 ## base urls
 
 `base_url` replaces the default endpoint root, and kage appends the

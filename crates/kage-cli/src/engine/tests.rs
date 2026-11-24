@@ -5053,6 +5053,221 @@ fn run_cost_comes_from_the_declared_model_price() {
     assert!((usage.unwrap().cost - 0.003).abs() < 1e-12);
 }
 
+fn reasoning_only_turn(usage: TokenUsage, stop_reason: StopReason) -> Script {
+    vec![
+        Ok(ProviderEvent::MessageStart),
+        Ok(ProviderEvent::ThinkingDelta {
+            delta: "I should answer the question".into(),
+        }),
+        Ok(ProviderEvent::MessageEnd { stop_reason, usage }),
+    ]
+}
+
+fn priced_mock(mock: MockProvider) -> ProviderRegistry {
+    ProviderRegistry::new().with(Arc::new(Declared {
+        mock,
+        model: kage_provider::ProviderModel {
+            id: "m".into(),
+            cost: Some(kage_core::ModelCost {
+                input: 100.0,
+                output: 1000.0,
+                cache_read: Some(10.0),
+                cache_write: Some(200.0),
+            }),
+            ..kage_provider::ProviderModel::default()
+        },
+    }))
+}
+
+#[test]
+fn rejected_usage_is_priced_recorded_and_replayed_before_a_valid_response() {
+    let rejected = TokenUsage {
+        input: 7,
+        output: 3,
+        cache_read: 11,
+        cache_write: 13,
+    };
+    let mock = MockProvider::sequence(vec![
+        reasoning_only_turn(rejected, StopReason::EndTurn),
+        text_turn("visible answer"),
+    ]);
+    let h = harness_on(priced_mock(mock.clone()));
+    let dir = tempfile::tempdir().unwrap();
+    let id = SessionId::new();
+    let (recorder, path) = recorder_in(dir.path(), id);
+    let mut spec = h.spec(id);
+    spec.recorder = Some(recorder);
+    spec.cx.budget.current_context = 57;
+    spec.loop_cfg.max_provider_retries = 1;
+    h.engine.open(spec);
+    prompt(&h.engine, id, "hi", Delivery::Queue);
+    let events = until_runs_end(&h.events, 1);
+    h.engine.shutdown();
+
+    assert_eq!(mock.call_count(), 2);
+    assert_eq!(outcomes(&events), [RunOutcome::Completed]);
+    let usage: Vec<_> = host_events(&events)
+        .into_iter()
+        .filter_map(|event| match event {
+            HostEvent::UsageUpdated { usage } if usage.total.output > 0 => Some(*usage),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(usage.len(), 2);
+    assert_eq!(usage[0].total, rejected);
+    assert_eq!(usage[0].context_used, 57);
+    assert!((usage[0].cost - 0.00641).abs() < 1e-12);
+    assert_eq!(
+        usage[1].total,
+        TokenUsage {
+            input: 17,
+            output: 5,
+            cache_read: 11,
+            cache_write: 13,
+        }
+    );
+    assert_eq!(usage[1].context_used, 12);
+    assert!(!usage[1].context_estimated);
+    assert!((usage[1].cost - 0.00941).abs() < 1e-12);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, Event::Loop(LoopEvent::MessageEnd { .. })))
+            .count(),
+        1
+    );
+    let replay = kage_session::replay(&path).unwrap();
+    assert_eq!(replay.history.len(), 2);
+    assert_eq!(
+        crate::cli_loop_run::first_user_text(&replay.history[1]),
+        "visible answer"
+    );
+    assert_eq!(replay.usage_total.input, 17);
+    assert_eq!(replay.usage_total.output, 5);
+    assert_eq!(replay.usage_total.cache_read, 11);
+    assert_eq!(replay.usage_total.cache_write, 13);
+    assert_eq!(replay.usage_total.last_context, 12);
+    let entries: Vec<_> = kage_session::SessionReader::iter(&path)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(entry,
+                kage_session::SessionEntry::Custom(custom)
+                    if kage_session::RejectedUsage::from_custom(custom).unwrap().is_some()
+            ))
+            .count(),
+        1
+    );
+    let recorded_usage = entries.iter().find_map(|entry| match entry {
+        kage_session::SessionEntry::Message(message) if message.message.role == Role::Assistant => {
+            message.usage
+        }
+        _ => None,
+    });
+    assert_eq!(
+        recorded_usage,
+        Some(TokenUsage {
+            input: 10,
+            output: 2,
+            ..TokenUsage::default()
+        })
+    );
+    assert!(
+        mock.requests()[1]
+            .messages
+            .iter()
+            .all(|message| message.role != Role::Assistant)
+    );
+}
+
+#[test]
+fn final_rejected_usage_is_durable_without_an_assistant_message() {
+    for (retries, stop_reason, attempts) in [
+        (0, StopReason::EndTurn, 1_u8),
+        (1, StopReason::EndTurn, 2),
+        (1, StopReason::MaxTokens, 1),
+    ] {
+        let rejected = TokenUsage {
+            input: 7,
+            output: 3,
+            cache_read: 11,
+            cache_write: 13,
+        };
+        let mock = MockProvider::replaying(reasoning_only_turn(rejected, stop_reason));
+        let h = harness_on(priced_mock(mock.clone()));
+        let dir = tempfile::tempdir().unwrap();
+        let id = SessionId::new();
+        let (recorder, path) = recorder_in(dir.path(), id);
+        let mut spec = h.spec(id);
+        spec.recorder = Some(recorder);
+        spec.cx.budget.current_context = 57;
+        spec.loop_cfg.max_provider_retries = retries;
+        h.engine.open(spec);
+        prompt(&h.engine, id, "hi", Delivery::Queue);
+        let events = until_runs_end(&h.events, 1);
+        h.engine.shutdown();
+
+        assert_eq!(
+            mock.call_count(),
+            usize::from(attempts),
+            "{stop_reason:?}, retries={retries}"
+        );
+        assert!(matches!(
+            outcomes(&events).as_slice(),
+            [RunOutcome::Failed { .. }]
+        ));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.event, Event::Loop(LoopEvent::MessageEnd { .. })))
+        );
+        let usage: Vec<_> = host_events(&events)
+            .into_iter()
+            .filter_map(|event| match event {
+                HostEvent::UsageUpdated { usage } if usage.total.output > 0 => Some(*usage),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(usage.len(), usize::from(attempts));
+        let final_usage = usage.last().unwrap();
+        assert_eq!(
+            final_usage.total,
+            TokenUsage {
+                input: rejected.input * u64::from(attempts),
+                output: rejected.output * u64::from(attempts),
+                cache_read: rejected.cache_read * u64::from(attempts),
+                cache_write: rejected.cache_write * u64::from(attempts),
+            }
+        );
+        assert_eq!(final_usage.context_used, 57);
+        assert!(!final_usage.context_estimated);
+        assert!((final_usage.cost - 0.00641 * f64::from(attempts)).abs() < 1e-12);
+        let replay = kage_session::replay(&path).unwrap();
+        assert_eq!(replay.history.len(), 1);
+        assert_eq!(replay.history[0].role, Role::User);
+        assert_eq!(replay.usage_total.input, final_usage.total.input);
+        assert_eq!(replay.usage_total.output, final_usage.total.output);
+        assert_eq!(replay.usage_total.cache_read, final_usage.total.cache_read);
+        assert_eq!(
+            replay.usage_total.cache_write,
+            final_usage.total.cache_write
+        );
+        assert_eq!(replay.usage_total.last_context, 0);
+        let entries: Vec<_> = kage_session::SessionReader::iter(&path)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 2 + usize::from(attempts));
+        assert!(matches!(
+            entries.last(),
+            Some(kage_session::SessionEntry::Custom(_))
+        ));
+    }
+}
+
 /// A tool of a given risk that reports it ran.
 #[derive(Debug)]
 struct Stub {

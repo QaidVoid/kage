@@ -6,8 +6,9 @@ starter one. A config that does not load stops kage with the error
 instead of running on defaults, and `kage doctor` names the file to
 fix.
 
-The TUI also runs `~/.config/kage/init.lua` after this file, so
-anything set there wins. The `[ui]`, `[loop]` and `[agents]` keys
+The host loads `~/.config/kage/init.lua` after this file, including
+its Lua provider registrations. The TUI also loads it for local UI
+settings, so anything set there wins. The `[ui]`, `[loop]` and `[agents]` keys
 that are options and the `[keybindings]` table feed the same settings `init.lua` sets.
 See [lua config](/guide/lua-config).
 
@@ -313,8 +314,14 @@ In the TUI, `init.lua` runs after all of these. An option it sets, such
 as `kage.opt.theme`, wins over every layer above.
 
 A running kage follows edits to these files. Saving the user config
-reloads the providers, so a model it now names resolves and the model
-picker lists it. Saving either file brings the open sessions' MCP
+reloads the providers and updates the host-authoritative TUI model
+picker. A changed `provider.default_model` updates the current default
+without replacing a startup `-m` choice. An explicitly selected model
+that the host cannot run fails instead of silently falling back.
+With `[models] auto_refresh = false`, automatic config, credential and
+cache reloads apply cached state without fetching model lists. Explicit
+authentication or provider settings actions can fetch a missing list;
+`kage models refresh` deliberately refreshes the lists. Saving either file brings the open sessions' MCP
 servers in line (see [MCP](/guide/mcp)). Other settings apply where
 kage reads them next: skills and session settings when a session opens,
 the TUI's own settings when it starts.
@@ -337,7 +344,8 @@ Every other project key waits for trust. That includes `[mcp]`
 `plugins.capabilities`, `plugins.dir`, `plugins.enabled`, any key
 kage does not know, the agent definitions in `.kage/agents/` (see
 [agents](/guide/agents#project-agents-and-trust)) and the skills in
-`.kage/skills/`. All of them share one trust decision.
+`.kage/skills/`, and the project instructions in `.kage/AGENTS.md`
+and `.agents/AGENTS.md`. All of them share one trust decision.
 
 The `[providers]` table, `[acp.agents]`, `[host]` (see
 [shared host](/guide/shared-host#configuration)), `[models]`, `plugins.registry` and the media
@@ -348,7 +356,7 @@ from a project, trusted or not.
 When the TUI starts in a project that sets any of these, it lists what
 the project asks for (server commands and URLs with every other
 server field such as `env`, sampling, capability grants, permission
-rules, tool settings, shell settings, project agents) and asks `Trust this project? [y/N]`. Answering yes records
+rules, tool settings, shell settings, project agents and instructions) and asks `Trust this project? [y/N]`. Answering yes records
 the trust. Any other answer starts kage with those tables and agents
 ignored.
 
@@ -357,27 +365,30 @@ your own config disables, so a tool can stay off everywhere but in one
 project.
 
 Print mode, `kage rpc` and `kage mcp serve` cannot ask. They print one
-warning on stderr and ignore the tables and agents. Run `kage trust`
+warning on stderr and ignore untrusted tables, agents, skills and
+instructions. Run `kage trust`
 in the project directory to allow them, and `kage trust --revoke` to
 take the trust back. An editor driving `kage rpc` needs `kage trust` once per
-project.
+project, unless standing trust already covers it.
 
 Trust covers the values as they are when you approve them. Your
 answer is bound to a digest of the whole gated set, so a file edited
 between the prompt and your answer is refused rather than trusted
 unseen, even when the prompt lines alone cannot tell the difference.
 Editing a server command, a permission rule or a capability grant,
-or adding, removing or editing a project agent or skill file, makes
+or adding, removing or editing a project agent, skill or instruction file, makes
 kage ask again, and the prompt then also shows what changed since
 you approved it: old and new values for config keys, and a diff for
-changed agent and skill files. Reordering keys does not. The whole
+changed agent, skill and instruction files. Reordering keys does not. The whole
 table is ignored while untrusted, even settings that only tighten
 your rules, such as a project that only adds `deny` patterns. `kage
 doctor` reports an untrusted project file and lists what changed.
 
 Trusted projects are recorded in `~/.local/state/kage/trust.json`,
 keyed by the project directory: the gated config values as JSON
-plus, for each project agent and skill file, a SHA-256 of its text.
+plus, for each project agent, skill and instruction file, a SHA-256 of
+its text. Older approvals that did not cover project instructions need
+reapproval before those instructions load.
 The approved texts are stored once under
 `~/.local/state/kage/trust/blobs/`, one file per distinct content,
 shared by every project that approved the same file. Kage converts
@@ -402,7 +413,7 @@ ask again. Be careful what you list: a path trusts every repository
 you later clone under it, not just the projects there today.
 
 A `[trust.parts]` entry trusts only the named parts under a directory.
-The parts are `instructions` (the project AGENTS.md), `agents` (the
+The parts are `instructions` (`.kage/AGENTS.md` and `.agents/AGENTS.md`), `agents` (the
 project agent files), `skills` (the project skills), and one per gated
 table: `mcp`, `permissions`, `tools`, `shell` and `plugins`. Every
 other part still prompts as usual, and an unknown part name is a
@@ -673,7 +684,7 @@ endpoints, and per-provider overrides (base URL, headers, key env var).
 | Path                                | Contents                                                       |
 | ----------------------------------- | -------------------------------------------------------------- |
 | `~/.config/kage/config.toml`        | user config                                                    |
-| `~/.config/kage/init.lua`           | trusted Lua config, TUI only ([lua config](/guide/lua-config)) |
+| `~/.config/kage/init.lua`           | trusted Lua config, host and TUI ([lua config](/guide/lua-config)) |
 | `~/.config/kage/lua/`               | modules `init.lua` can `require`                               |
 | `<workdir>/.kage/config.toml`       | project-local config overlay                                   |
 | `~/.config/kage/agents/`            | agent definition `.md` files ([agents](/guide/agents))         |
@@ -688,7 +699,7 @@ endpoints, and per-provider overrides (base URL, headers, key env var).
 | `~/.local/share/kage/plugin-state/` | per-plugin `kage.store` JSON files                             |
 | `~/.local/state/kage/`              | session state (`state.json`) and input history (`history.txt`) |
 | `~/.local/state/kage/trust.json`    | trusted project records: gated values plus file hashes          |
-| `~/.local/state/kage/trust/blobs/`  | approved agent and skill texts, one file per SHA-256            |
+| `~/.local/state/kage/trust/blobs/`  | approved agent, skill and instruction texts, one file per SHA-256            |
 | `~/.cache/kage/models.json`         | model catalog, refreshed by a running kage or `kage models refresh` |
 | `~/.cache/kage/models.json.etag`    | what the catalog server tagged the cached catalog with          |
 | `~/.cache/kage/chatgpt-models.json` | ChatGPT plan models, written at sign-in and refreshed like the catalog |
@@ -721,7 +732,30 @@ group = "repo"
 
 Only the user config sets `[sessions]`, and a change files new sessions
 only. Sessions recorded before this layout stay in `sessions/` itself
-and keep working.
+and keep working. Normal session commands discover these flat files
+without moving them.
+
+To relocate legacy recordings explicitly:
+
+```sh
+kage migrate-sessions --offline
+```
+
+`--offline` acknowledges that **all** other Kage processes are stopped,
+including shared hosts, standalone clients and older binaries. Keep them
+stopped until migration finishes. Back up the entire sessions tree first,
+including `blobs/` and the catalog files, not just the JSONL recordings.
+Locks cannot make relocation safe against older running versions. Migration
+never replaces a different destination file. A filesystem without a safe
+no-replace rename or hard links leaves the affected recordings in place
+and reports the failure.
+
+New recordings use format v4. Downgrading is not safe by replacing only
+the binary: older versions may not understand these recordings. Save a
+pre-upgrade copy of the whole sessions tree. To return to an old version,
+stop all Kage processes, preserve the post-upgrade tree separately so new
+recordings are not silently lost, and restore the saved pre-upgrade data
+before starting the old binary. Do not restore over running old binaries.
 
 ## skills and templates
 

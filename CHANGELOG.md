@@ -1,4 +1,22 @@
 # Changelog
+
+## [Unreleased]
+
+### Upgrade Notes
+
+- Back up the complete sessions tree, including blobs and catalog files,
+  before upgrading. Format v4 recordings are not safe for binary-only
+  downgrades. Stop all Kage processes, preserve new recordings separately,
+  and restore saved pre-upgrade data before running an older binary.
+- Flat recordings remain discoverable without relocation. To move them,
+  stop all other Kage processes, including older binaries and shared
+  hosts, then run `kage migrate-sessions --offline`. The flag acknowledges
+  that they are stopped for the entire migration.
+- Project instructions in `.kage/AGENTS.md` and `.agents/AGENTS.md` now
+  require content-bound trust. Older approvals that did not cover them
+  need reapproval; edits invalidate approval unless standing trust covers
+  the `instructions` part.
+
 ## [0.6.0](https://github.com/QaidVoid/kage/compare/v0.5.1...v0.6.0) - 2026-10-29
 
 ### Features

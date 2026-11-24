@@ -76,16 +76,24 @@ The table lists every built-in command.
 | `/reload`                 | Reload `init.lua` and plugins now, without waiting for a file change. A toast reports the result, and each error shows in the conversation. |
 | `/quit` / `/q`            | Exit the TUI                                    |
 
-## commands the TUI does not run yet
+## native and external sessions
 
-The TUI talks to its agent over ACP, which has no counterpart yet for
-some of the commands above. These answer with "... is not available
-over the ACP link yet" and change nothing: shell escapes, `/undo`,
-`/rewind`, `/clone`, forking from the `/tree` picker, deleting a
-session from it, `/image` and `/media` (open and save), `/reload`,
-`/mcp restart`, and the provider refresh `/login` ends with. See [the
-TUI's ACP link](/reference/architecture#the-tuis-acp-link) for how the
-link works.
+Native Kage sessions support shell escapes (`!command`), `/undo`,
+`/rewind`, `/clone`, fork and delete from `/tree`, `/reload`,
+`/mcp restart`, provider reload after `/login`, and `/image` and `/media`
+(open and save) over ACP, with both shared and standalone hosts.
+Media lookup reads the full recording, not just the visible transcript.
+The viewer or player opens on the TUI's machine; saves use the session's
+working directory on the host.
+
+Persistent external ACP sessions are supported on Linux. The external
+agent owns its history, files, models and modes. Kage's shell escapes,
+`/undo`, `/rewind`, `/clone`, history forks, `/compact`, `/export`,
+`/image`, `/media`, `/mcp restart`, `/swarm` and `/goal` are not available
+for these sessions. Thinking and permission choices follow the options
+the agent advertises; `/plan` requires its own plan mode. Deleting a Kage
+recording does not delete the external agent's upstream history.
+See [external sessions](/editors/acp-client#external-sessions).
 
 ## settings
 

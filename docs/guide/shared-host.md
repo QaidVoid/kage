@@ -219,13 +219,20 @@ project's trust changed gets them freshly loaded, while sessions already
 open keep what they started with. A project's plugins unload a minute
 after its last session closes. A project with nothing to load, no
 plugin under the plugins directory and no `init.lua` or `lua/` modules
-of the user, builds no runtime for its sessions. Two things still come
-from the plugins the host loaded at startup, not from `init.lua`:
-providers a plugin registers, and `kage.acp` agents and permission
-handlers.
+of the user, builds no runtime for its sessions.
+
+The host also loads user plugins and `init.lua` for its process-wide
+provider registrations, `kage.acp` agents and permission handlers. A
+provider reload replaces these registrations, including removed agents
+and permission policies. With no policy, upstream tool requests are
+denied. The TUI model picker uses the host's advertised models, and an
+explicit model the host cannot resolve is rejected instead of opening a
+session on another provider.
 
 A config or credential change made through a client, such as the
-desktop's settings, reloads the providers for every client.
+desktop's settings, reloads the providers for every client. New sessions
+use the current configured default, unless the host started with an
+explicit `-m` override.
 
 ## memory
 

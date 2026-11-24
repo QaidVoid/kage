@@ -424,13 +424,22 @@ ask.
 
 ```toml
 [models]
-auto_refresh = true          # false: only `kage models refresh` updates
+auto_refresh = true          # false: no automatic network refresh
 refresh_interval_hours = 24  # how often to check, at least 1
 ```
 
-Only the user config sets `[models]`. To go back to the snapshot, set
-`auto_refresh = false`, delete the cache and restart kage: a running
-kage fetches a missing cache again.
+Only the user config sets `[models]`. With `auto_refresh = false`,
+automatic filesystem, credential and cache reloads still apply locally
+cached state, but do not fetch model lists. Explicit authentication and
+provider settings actions can fetch a missing list; `kage models refresh`
+is a separate deliberate network refresh. To go back to the snapshot,
+set `auto_refresh = false`, delete the cache and restart kage.
+
+The host owns provider registration, including providers in `init.lua`.
+The TUI model picker uses the host's list rather than an independent local
+registry. A reload updates the current default model while preserving a
+startup `-m` choice. An explicitly requested model that is unavailable
+fails rather than silently selecting a different model.
 
 Because the catalog is curated upstream, a refresh can bring Command
 Code and Kenari model changes too, not only the models.dev ones. Pass

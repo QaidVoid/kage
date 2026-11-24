@@ -244,8 +244,7 @@ editor's command list.
 In-flight tool calls hold the old connection, so a busy session keeps
 the name until its next run starts, and an idle session restarts at
 once. The engine path sends it from `/mcp restart`, from the picker and
-after a login; the TUI, which speaks ACP, refuses it (see
-[the TUI's ACP link](#the-tuis-acp-link)). `kage.mcp.restart` from Lua
+after a login, including from the TUI over ACP. `kage.mcp.restart` from Lua
 joins the same list at run start.
 
 **MCP work off the dispatcher.** The dispatcher never waits on an MCP
@@ -334,18 +333,16 @@ settings and the TUI's plugin hosting survive the switch. A hosted
 plugin MCP server that sets `disabled_tools` or `oauth` is started by
 the agent without them, and the TUI warns when it sends one.
 
-The ACP link has no counterpart yet for some commands the engine path
-served. The TUI refuses each with the notice "... is not available over
-the ACP link yet":
+Native sessions expose shell, undo, rewind, fork, clone, delete, plugin
+reload, provider reload and MCP restart operations over ACP. The TUI
+supports these with shared and standalone hosts. Media open reads the
+newest produced image or audio from the full recording through
+`_kage/media/read` and opens it locally. Media save reuses
+`_kage/image/save` on the host. External agents own their history and
+files, so the native engine operations do not apply to their sessions.
 
-| Command | What it was |
-| --- | --- |
-| shell escapes | running a shell command from the prompt |
-| fork, rewind, undo | forking or rewinding the live session |
-| clone | cloning the session |
-| image open, image save, media open, media save | opening or saving attachments |
-| reload plugins, refresh providers, restart MCP (`/mcp restart`) | reloading what the engine held |
-| fork a session file, delete a session | acting on recorded sessions |
+The host loads `init.lua` provider registrations, and its model list is
+authoritative for the TUI picker.
 
 An attachment kept in the session's blob store cannot ride the link and
 is dropped with a warning.
@@ -491,7 +488,7 @@ A session file is a single JSONL stream. The first line is a
 branch from any point:
 
 ```jsonl
-{"type":"header","version":1,"session":"...","id":"...","ts":"...","cwd":"...","model":"...","system_prompt":"..."}
+{"type":"header","version":4,"session":"...","id":"...","ts":"...","cwd":"...","model":"...","system_prompt":"..."}
 {"type":"message","id":"...","ts":"...","message":{"role":"user","content":[...]}}
 {"type":"message","id":"...","ts":"...","message":{"role":"assistant","content":[...]}}
 {"type":"compaction","id":"...","ts":"...","kept":4,"summarized":12,"summary":"..."}

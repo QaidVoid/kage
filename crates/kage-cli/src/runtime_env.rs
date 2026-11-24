@@ -311,34 +311,73 @@ mod tests {
     }
 
     #[test]
-    fn instruction_files_lists_both_project_homes_when_trusted() {
-        let work = tempfile::tempdir().unwrap();
-        std::fs::create_dir(work.path().join(".kage")).unwrap();
-        std::fs::create_dir(work.path().join(".agents")).unwrap();
-        let project: Vec<_> = instruction_files(work.path())
-            .into_iter()
-            .filter(|(_, tag)| *tag == "project_instructions")
-            .map(|(path, _)| path)
-            .collect();
-        assert_eq!(
-            project,
-            vec![
-                work.path().join(".kage").join("AGENTS.md"),
-                work.path().join(".agents").join("AGENTS.md"),
-            ]
-        );
-        // Both blocks render, kage home first.
-        std::fs::write(&project[0], "Kage rules.").unwrap();
-        std::fs::write(&project[1], "Shared rules.").unwrap();
-        let files: Vec<_> = project
-            .into_iter()
-            .map(|path| (path, "project_instructions"))
-            .collect();
-        let out = instructions_block(&files);
-        assert!(
-            out.find("Kage rules.").unwrap() < out.find("Shared rules.").unwrap(),
-            "{out}"
-        );
+    #[expect(
+        clippy::result_large_err,
+        reason = "figment::Jail closures must return figment::Error"
+    )]
+    fn instruction_files_enforce_trust_and_always_keep_user_instructions() {
+        figment::Jail::expect_with(|jail| {
+            let root = jail.directory().to_path_buf();
+            for (key, dir) in [
+                ("HOME", "home"),
+                ("XDG_CONFIG_HOME", "config"),
+                ("XDG_STATE_HOME", "state"),
+            ] {
+                jail.set_env(key, root.join(dir).to_string_lossy().as_ref());
+            }
+            let user_dir = crate::config_dir().unwrap();
+            std::fs::create_dir_all(&user_dir).unwrap();
+            std::fs::write(user_dir.join("AGENTS.md"), "User rules.").unwrap();
+            let work = root.join("project");
+            for home in [".kage", ".agents"] {
+                std::fs::create_dir_all(work.join(home)).unwrap();
+            }
+            let project_files = [work.join(".kage/AGENTS.md"), work.join(".agents/AGENTS.md")];
+            std::fs::write(&project_files[0], "Kage rules.").unwrap();
+            std::fs::write(&project_files[1], "Shared rules.").unwrap();
+            let prompt = || instructions_block(&instruction_files(&work));
+            let untrusted = prompt();
+            assert!(untrusted.contains("User rules."));
+            assert!(!untrusted.contains("project_instructions"));
+
+            let config = user_dir.join("config.toml");
+            let standing = |part| {
+                format!(
+                    "[trust.parts]\n{:?} = [\"{part}\"]\n",
+                    work.display().to_string()
+                )
+            };
+            std::fs::write(&config, standing("skills")).unwrap();
+            assert!(!prompt().contains("project_instructions"));
+            std::fs::write(&config, standing("instructions")).unwrap();
+            let trusted = prompt();
+            assert!(trusted.contains("User rules."));
+            assert!(trusted.find("Kage rules.").unwrap() < trusted.find("Shared rules.").unwrap());
+            let listed: Vec<_> = instruction_files(&work)
+                .into_iter()
+                .filter(|(_, tag)| *tag == "project_instructions")
+                .map(|(path, _)| path)
+                .collect();
+            assert_eq!(listed, project_files);
+
+            std::fs::write(&config, "").unwrap();
+            let presented = kage_core::trust::untrusted_project(&work).unwrap();
+            kage_core::trust::trust_project(&work, &presented).unwrap();
+            assert_eq!(prompt(), trusted);
+            for path in &project_files {
+                std::fs::write(path, "Changed rules.").unwrap();
+                let blocked = prompt();
+                assert!(blocked.contains("User rules."));
+                assert!(!blocked.contains("project_instructions"));
+                let presented = kage_core::trust::untrusted_project(&work).unwrap();
+                kage_core::trust::trust_project(&work, &presented).unwrap();
+                assert!(prompt().contains("Changed rules."));
+            }
+            kage_core::trust::revoke_project(&work).unwrap();
+            assert!(prompt().contains("User rules."));
+            assert!(!prompt().contains("project_instructions"));
+            Ok(())
+        });
     }
 
     #[test]

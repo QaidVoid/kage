@@ -1,14 +1,16 @@
-//! Trust for project-local settings under `<workdir>/.kage`.
+//! Trust for project-local settings and instruction files.
 //!
 //! A project can start processes, run other binaries and reshape
 //! the tools the model sees, so its `config.toml` passes only the
 //! keys [`UNTRUSTED_SAFE_KEYS`] lists while the project is untrusted.
 //! Every other key in it waits for trust, and so do its agent
 //! definitions (`agents/*.md`, which can set tools and models) and
-//! skills. Trust is recorded in `$XDG_STATE_HOME/kage/trust.json`
-//! as the exact values that were approved, keyed by the canonical
-//! project directory: the gated config subset as JSON plus, for each
-//! agent and skill file, a SHA-256 of its text. The approved texts
+//! skills and project instructions (`.kage/AGENTS.md` and
+//! `.agents/AGENTS.md`). Trust is recorded in
+//! `$XDG_STATE_HOME/kage/trust.json` as the exact values that were
+//! approved, keyed by the canonical project directory: the gated
+//! config subset as JSON plus, for each agent, skill and instruction
+//! file, a SHA-256 of its text. The approved texts
 //! live once in `$XDG_STATE_HOME/kage/trust/blobs/<sha256>`, shared
 //! by every project that approved them, so the store stays small
 //! while a later diff still has the old text to show. Any later edit
@@ -61,17 +63,17 @@ const UNTRUSTED_SAFE_KEYS: &[(&str, &[&str])] = &[
 ];
 
 /// One way the project's gated settings differ from what the user
-/// approved: a line naming the change, and for a changed agent or
-/// skill file whose approved text is still stored, a unified diff
-/// between the two texts.
+/// approved: a line naming the change, and for a changed project file
+/// whose approved text is still stored, a unified diff between the
+/// two texts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrustChange {
     /// One line naming the change: a config key added, removed or
-    /// changed with its old and new values, or an agent or skill
-    /// file added, removed or changed. Names and values are escaped.
+    /// changed with its old and new values, or a project file added,
+    /// removed or changed. Names and values are escaped.
     pub line: String,
     /// An escaped unified diff, capped to a sane length, for a
-    /// changed agent or skill file whose approved blob exists.
+    /// changed project file whose approved blob exists.
     pub diff: Option<String>,
 }
 
@@ -82,14 +84,17 @@ pub struct TrustSummary {
     pub path: PathBuf,
     /// The gated parts the project sets, by key path: `mcp`,
     /// `permissions`, `plugins.capabilities`, `tools`, `shell`,
-    /// `agents`, `skills`, and any other gated key by its name.
+    /// `agents`, `skills`, `instructions`, and any other gated key by
+    /// its name.
     pub keys: Vec<String>,
-    /// One human-readable line per server, grant, rule, agent or skill.
+    /// One human-readable line per server, grant, rule or project file.
     pub items: Vec<String>,
     /// Names of the project agents.
     pub agents: Vec<String>,
     /// Names of the project skills.
     pub skills: Vec<String>,
+    /// Relative paths of the project instruction files.
+    pub instructions: Vec<String>,
     /// SHA-256 of the exact gated settings this summary was built
     /// from. An approval is bound to it rather than to the prompt
     /// lines, which render some values only lossily, so a value the
@@ -102,8 +107,8 @@ pub struct TrustSummary {
 }
 
 /// The trust store: per project, the approved gated config subset as
-/// JSON plus, under `agents` and `skills`, the SHA-256 of each
-/// approved file text instead of the text. Version 1 records held
+/// JSON plus, under `agents`, `skills` and `instructions`, the SHA-256
+/// of each approved file text instead of the text. Version 1 records held
 /// the full texts; [`load_store`] migrates them on first read.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Store {
@@ -226,8 +231,8 @@ fn part_for_key(key: &str) -> Option<TrustPart> {
 
 /// Summary of the project's gated settings when they are present and
 /// not trusted. `None` when the project sets only safe keys and has
-/// no agents or skills, everything is covered by the user config's
-/// `[trust]`, or the current gated values are trusted. Only the
+/// no agents, skills or instructions, everything is covered by the
+/// user config's `[trust]`, or the current gated values are trusted. Only the
 /// parts no `[trust]` entry covers reach the summary, so a prompt
 /// asks for those alone. A project whose stored record differs from
 /// the current gated settings additionally carries, in `changes`,
@@ -286,7 +291,7 @@ fn untrusted_subset(workdir: &Path) -> Option<(Value, StandingTrust)> {
 /// and compared by the digest of the exact record before anything is
 /// stored, so a project edited between the prompt and the approval
 /// is refused instead of being trusted unseen, whatever the prompt
-/// lines did or did not show. The approved agent and skill texts are
+/// lines did or did not show. The approved project file texts are
 /// written to the blob directory, and blobs no record references
 /// are deleted. Returns what was trusted, or `None` when there was
 /// nothing left to trust.
@@ -388,8 +393,8 @@ fn project_table(workdir: &Path) -> Option<(toml::Table, bool)> {
     Some((table, changed))
 }
 
-/// The gated config keys of `table` plus the project agent and skill
-/// files, or `None` when there are none.
+/// The gated config keys of `table` plus the project agent, skill and
+/// instruction files, or `None` when there are none.
 fn risky_subset(workdir: &Path, table: Option<&toml::Table>) -> Option<Value> {
     let mut out = match table {
         Some(table) => config_subset(table),
@@ -402,6 +407,10 @@ fn risky_subset(workdir: &Path, table: Option<&toml::Table>) -> Option<Value> {
     let skills = skill_files(workdir);
     if !skills.is_empty() {
         out.insert("skills".to_owned(), Value::Object(skills));
+    }
+    let instructions = instruction_files(workdir);
+    if !instructions.is_empty() {
+        out.insert("instructions".to_owned(), Value::Object(instructions));
     }
     (!out.is_empty()).then_some(Value::Object(out))
 }
@@ -420,6 +429,7 @@ fn subtract_standing(subset: &mut Value, standing: &StandingTrust) -> bool {
     map.retain(|key, _| match key.as_str() {
         "agents" => !standing.parts.contains(&TrustPart::Agents),
         "skills" => !standing.parts.contains(&TrustPart::Skills),
+        "instructions" => !standing.parts.contains(&TrustPart::Instructions),
         key => !part_for_key(key).is_some_and(|part| standing.parts.contains(&part)),
     });
     !map.is_empty()
@@ -553,6 +563,19 @@ fn skill_files(workdir: &Path) -> serde_json::Map<String, Value> {
     out
 }
 
+/// Relative path to full text of each project instruction file. Both
+/// homes load together, so neither file shadows the other.
+fn instruction_files(workdir: &Path) -> serde_json::Map<String, Value> {
+    [".kage/AGENTS.md", ".agents/AGENTS.md"]
+        .into_iter()
+        .filter_map(|relative| {
+            std::fs::read_to_string(workdir.join(relative))
+                .ok()
+                .map(|text| (relative.to_owned(), Value::String(text)))
+        })
+        .collect()
+}
+
 fn is_trusted(workdir: &Path, subset: &Value, standing: &StandingTrust) -> bool {
     load_store()
         .ok()
@@ -577,6 +600,7 @@ fn summarize(workdir: &Path, subset: &Value) -> TrustSummary {
     let mut items = Vec::new();
     let mut agents: Vec<String> = Vec::new();
     let mut skills: Vec<String> = Vec::new();
+    let mut instructions = Vec::new();
     for (key, value) in subset.as_object().into_iter().flatten() {
         let items_before = items.len();
         let keys_before = keys.len();
@@ -620,6 +644,14 @@ fn summarize(workdir: &Path, subset: &Value) -> TrustSummary {
                 keys.push("tools".to_owned());
                 items.extend(tool_items(value));
             }
+            "instructions" => {
+                keys.push(key.clone());
+                for (path, _) in value.as_object().into_iter().flatten() {
+                    let shown = path.escape_debug().to_string();
+                    items.push(format!("project instructions ({shown})"));
+                    instructions.push(shown);
+                }
+            }
             "agents" | "skills" => {
                 for (name, _) in value.as_object().into_iter().flatten() {
                     let shown = name.escape_debug();
@@ -660,6 +692,7 @@ fn summarize(workdir: &Path, subset: &Value) -> TrustSummary {
         items,
         agents,
         skills,
+        instructions,
         digest: digest_value(subset),
         changes: Vec::new(),
     }
@@ -958,11 +991,11 @@ fn gc_blobs(store: &Store) -> Result<()> {
     Ok(())
 }
 
-/// Every hash a record references: the values of its `agents` and
-/// `skills` maps.
+/// Every hash a record references: the values of its `agents`,
+/// `skills` and `instructions` maps.
 fn record_hashes(record: &Value) -> Vec<String> {
     let mut out = Vec::new();
-    for key in ["agents", "skills"] {
+    for key in ["agents", "skills", "instructions"] {
         out.extend(
             record
                 .get(key)
@@ -977,12 +1010,12 @@ fn record_hashes(record: &Value) -> Vec<String> {
 }
 
 /// The stored form of `subset`: the gated config keys unchanged and
-/// each agent and skill file text reduced to its SHA-256, the shape a
+/// each project file text reduced to its SHA-256, the shape a
 /// record has on disk. No blobs are written; hashing alone decides
 /// trust, so this comparison never touches the blob directory.
 fn record_view(subset: &Value) -> Value {
     let mut record = subset.clone();
-    for key in ["agents", "skills"] {
+    for key in ["agents", "skills", "instructions"] {
         let Some(texts) = record.get_mut(key).and_then(Value::as_object_mut) else {
             continue;
         };
@@ -996,14 +1029,14 @@ fn record_view(subset: &Value) -> Value {
     record
 }
 
-/// Build the stored record for `subset`, writing each agent and
-/// skill file text to the blob directory once.
+/// Build the stored record for `subset`, writing each project
+/// file text to the blob directory once.
 ///
 /// # Errors
 ///
 /// When a blob cannot be written.
 fn record_from_subset(subset: &Value) -> Result<Value> {
-    for key in ["agents", "skills"] {
+    for key in ["agents", "skills", "instructions"] {
         for text in subset
             .get(key)
             .and_then(Value::as_object)
@@ -1054,7 +1087,7 @@ fn canonical_json(value: &Value) -> String {
 
 /// What changed in `subset` since the approved `record`: one
 /// [`TrustChange`] per added, removed or changed config key and per
-/// added, removed or changed agent or skill file.
+/// added, removed or changed agent, skill or instruction file.
 fn diff_record(record: &Value, subset: &Value) -> Vec<TrustChange> {
     let mut out = Vec::new();
     let mut keys: BTreeSet<&String> = record
@@ -1066,8 +1099,12 @@ fn diff_record(record: &Value, subset: &Value) -> Vec<TrustChange> {
     for key in keys {
         let path = key.escape_debug().to_string();
         match key.as_str() {
-            "agents" | "skills" => {
-                let kind = if key == "agents" { "agent" } else { "skill" };
+            "agents" | "skills" | "instructions" => {
+                let kind = match key.as_str() {
+                    "agents" => "agent",
+                    "skills" => "skill",
+                    _ => "instructions",
+                };
                 diff_files(kind, record.get(key), subset.get(key), &mut out);
             }
             _ => diff_values(&path, record.get(key), subset.get(key), &mut out),
@@ -1225,7 +1262,7 @@ fn load_store() -> Result<Store> {
 /// When a blob or the store cannot be written.
 fn migrate_v1(store: &mut Store) -> Result<()> {
     for record in store.projects.values_mut() {
-        for key in ["agents", "skills"] {
+        for key in ["agents", "skills", "instructions"] {
             let Some(texts) = record.get_mut(key).and_then(Value::as_object_mut) else {
                 continue;
             };
@@ -1313,6 +1350,147 @@ mod tests {
 
     fn load(project: &Path) -> figment::error::Result<Config> {
         Config::load_layered(project).map_err(io)
+    }
+
+    #[test]
+    fn instruction_only_projects_require_trust() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, "")?;
+            std::fs::remove_file(Config::project_path(&project)).map_err(io)?;
+            for home in [".kage", ".agents"] {
+                std::fs::create_dir_all(project.join(home)).map_err(io)?;
+                let path = project.join(home).join("AGENTS.md");
+                std::fs::write(&path, "Project rules.\n").map_err(io)?;
+                assert!(!project_part_trusted(&project, TrustPart::Instructions));
+                let summary = untrusted_project(&project).expect("instructions wait for trust");
+                assert_eq!(summary.keys, ["instructions"]);
+                assert_eq!(summary.instructions, [format!("{home}/AGENTS.md")]);
+                std::fs::remove_file(path).map_err(io)?;
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn standing_instruction_trust_is_separate_from_skill_trust() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, "")?;
+            for home in [".kage", ".agents"] {
+                std::fs::create_dir_all(project.join(home)).map_err(io)?;
+                std::fs::write(project.join(home).join("AGENTS.md"), "Project rules.\n")
+                    .map_err(io)?;
+            }
+            let skill = project.join(".kage/skills/helper");
+            std::fs::create_dir_all(&skill).map_err(io)?;
+            std::fs::write(skill.join("SKILL.md"), "Help.\n").map_err(io)?;
+            write_user_config(jail, "[trust.parts]\n\"~/project\" = [\"skills\"]\n")?;
+            assert!(project_part_trusted(&project, TrustPart::Skills));
+            assert!(!project_part_trusted(&project, TrustPart::Instructions));
+            let summary = untrusted_project(&project).expect("instructions still wait");
+            assert_eq!(summary.keys, ["instructions"]);
+            assert_eq!(
+                summary.instructions,
+                [".kage/AGENTS.md", ".agents/AGENTS.md"]
+            );
+
+            write_user_config(jail, "[trust.parts]\n\"~/project\" = [\"instructions\"]\n")?;
+            assert!(project_part_trusted(&project, TrustPart::Instructions));
+            assert!(!project_part_trusted(&project, TrustPart::Skills));
+            let summary = untrusted_project(&project).expect("skills still wait");
+            assert_eq!(summary.keys, ["skills"]);
+            assert!(summary.instructions.is_empty());
+            trust_project(&project, &summary).map_err(io)?;
+            assert!(untrusted_project(&project).is_none());
+            std::fs::write(project.join(".agents/AGENTS.md"), "New standing rules.\n")
+                .map_err(io)?;
+            assert!(untrusted_project(&project).is_none());
+            write_user_config(jail, "")?;
+            assert!(!project_part_trusted(&project, TrustPart::Instructions));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn both_instruction_files_bind_approval_and_retain_blobs() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, "")?;
+            let paths = [".kage/AGENTS.md", ".agents/AGENTS.md"];
+            let texts = ["Kage rules.\n", "Shared rules.\n"];
+            std::fs::create_dir_all(project.join(".agents")).map_err(io)?;
+            for (path, text) in paths.iter().zip(texts) {
+                std::fs::write(project.join(path), text).map_err(io)?;
+            }
+            let summary = untrusted_project(&project).expect("both files wait");
+            assert_eq!(summary.instructions, paths);
+            assert_eq!(
+                summary.items,
+                [
+                    "project instructions (.kage/AGENTS.md)",
+                    "project instructions (.agents/AGENTS.md)",
+                ]
+            );
+            trust_project(&project, &summary).map_err(io)?;
+            assert!(project_part_trusted(&project, TrustPart::Instructions));
+            let store = load_store().map_err(io)?;
+            let record = &store.projects[&store_key(&project)];
+            for (path, text) in paths.iter().zip(texts) {
+                assert_eq!(record["instructions"][path], sha256_hex(text));
+                assert_eq!(read_blob(&sha256_hex(text)).as_deref(), Some(text));
+            }
+
+            for (path, text) in paths.iter().zip(texts) {
+                std::fs::write(project.join(path), "Changed rules.\n").map_err(io)?;
+                assert!(!project_part_trusted(&project, TrustPart::Instructions));
+                let changed = untrusted_project(&project).expect("edit invalidates approval");
+                assert_eq!(changed.changes.len(), 1);
+                assert_eq!(
+                    changed.changes[0].line,
+                    format!("project instructions `{path}` content changed")
+                );
+                let diff = changed.changes[0].diff.as_deref().expect("retained blob");
+                assert!(diff.contains(&format!("-{}", text.trim())));
+                assert!(diff.contains("+Changed rules."));
+                assert!(trust_project(&project, &summary).is_err());
+                trust_project(&project, &changed).map_err(io)?;
+                assert!(untrusted_project(&project).is_none());
+                assert!(read_blob(&sha256_hex(text)).is_none());
+            }
+            std::fs::remove_file(project.join(paths[0])).map_err(io)?;
+            let removed = untrusted_project(&project).expect("removal invalidates approval");
+            assert_eq!(
+                removed.changes[0].line,
+                "project instructions `.kage/AGENTS.md` removed"
+            );
+            trust_project(&project, &removed).map_err(io)?;
+            assert!(revoke_project(&project).map_err(io)?);
+            assert!(read_blob(&sha256_hex("Changed rules.\n")).is_none());
+            assert!(!project_part_trusted(&project, TrustPart::Instructions));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn older_approvals_do_not_cover_new_instruction_files() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, RISKY)?;
+            let summary = untrusted_project(&project).expect("settings wait");
+            trust_project(&project, &summary).map_err(io)?;
+            assert!(untrusted_project(&project).is_none());
+            std::fs::write(project.join(".kage/AGENTS.md"), "Previously ungated.\n").map_err(io)?;
+            assert!(!project_part_trusted(&project, TrustPart::Instructions));
+            let summary = untrusted_project(&project).expect("old approval lacks instructions");
+            assert_eq!(
+                summary.changes[0].line,
+                "project instructions `.kage/AGENTS.md` added"
+            );
+            trust_project(&project, &summary).map_err(io)?;
+            assert!(untrusted_project(&project).is_none());
+            Ok(())
+        });
     }
 
     const RISKY: &str = r#"

@@ -64,8 +64,8 @@ fn revoke_from_config_message(workdir: &Path, standing: &StandingTrust) -> Strin
 }
 
 /// Before the TUI starts, ask whether to trust `workdir`'s project
-/// when it has untrusted risky settings or agents. Yes records trust,
-/// and anything else runs with those settings and agents ignored.
+/// when it has untrusted settings or project files. Yes records
+/// trust, and anything else runs with those settings and files ignored.
 /// Without a terminal on stdin this only prints the warning.
 pub(crate) fn confirm_project_trust(workdir: &Path) {
     let Some(summary) = trust::untrusted_project(workdir) else {
@@ -108,7 +108,7 @@ pub(crate) fn confirm_project_trust(workdir: &Path) {
 }
 
 /// Print one stderr line when `workdir`'s project has untrusted risky
-/// settings or agents that this run ignores.
+/// settings or project files that this run ignores.
 pub(crate) fn warn_if_untrusted(workdir: &Path) {
     if let Some(summary) = trust::untrusted_project(workdir) {
         eprintln!("{}", warning(workdir, &summary));
@@ -119,7 +119,7 @@ fn warning(workdir: &Path, summary: &TrustSummary) -> String {
     let settings: Vec<&str> = summary
         .keys
         .iter()
-        .filter(|key| !matches!(key.as_str(), "agents" | "skills"))
+        .filter(|key| !matches!(key.as_str(), "agents" | "skills" | "instructions"))
         .map(String::as_str)
         .collect();
     let mut parts = Vec::new();
@@ -134,6 +134,12 @@ fn warning(workdir: &Path, summary: &TrustSummary) -> String {
     }
     if !summary.skills.is_empty() {
         parts.push(format!("project skills ({})", summary.skills.join(", ")));
+    }
+    if !summary.instructions.is_empty() {
+        parts.push(format!(
+            "project instructions ({})",
+            summary.instructions.join(", ")
+        ));
     }
     let head = format!(
         "kage: ignoring untrusted {} in {}",
@@ -186,7 +192,7 @@ pub(crate) fn run(revoke: bool) -> ExitCode {
     }
     let Some(presented) = trust::untrusted_project(&workdir) else {
         eprintln!(
-            "kage: {} has no settings waiting for trust and no agents or skills to trust",
+            "kage: {} has no settings waiting for trust and no agents, skills or instructions to trust",
             workdir.join(".kage").display()
         );
         return ExitCode::SUCCESS;
@@ -228,6 +234,7 @@ mod tests {
             items: Vec::new(),
             agents: agents.iter().map(|a| (*a).to_owned()).collect(),
             skills: skills.iter().map(|s| (*s).to_owned()).collect(),
+            instructions: Vec::new(),
             digest: String::new(),
             changes: Vec::new(),
         }
@@ -311,6 +318,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn warning_names_instruction_files_not_config_settings() {
+        let mut summary = summary(&["instructions"], &[], &[]);
+        summary.instructions = vec![".kage/AGENTS.md".to_owned(), ".agents/AGENTS.md".to_owned()];
+        assert_eq!(
+            warning(Path::new("/p"), &summary),
+            "kage: ignoring untrusted project instructions (.kage/AGENTS.md, .agents/AGENTS.md) \
+             in /p. Run `kage trust` in that directory to allow them."
+        );
+        summary.changes.push(TrustChange {
+            line: "project instructions `.agents/AGENTS.md` content changed".to_owned(),
+            diff: Some("--- approved\n+++ current\n-old\n+new".to_owned()),
+        });
+        let warning = warning(Path::new("/p"), &summary);
+        assert!(warning.contains("project instructions `.agents/AGENTS.md` content changed"));
+        assert!(warning.contains("    -old\n    +new"));
+        assert!(!warning.contains("config.toml"));
+    }
+
     /// A summary whose project was trusted before and has changed,
     /// with one config change and one file change with a diff.
     fn changed_summary() -> TrustSummary {
@@ -320,6 +346,7 @@ mod tests {
             items: Vec::new(),
             agents: Vec::new(),
             skills: vec!["helper".to_owned()],
+            instructions: Vec::new(),
             digest: String::new(),
             changes: vec![
                 TrustChange {

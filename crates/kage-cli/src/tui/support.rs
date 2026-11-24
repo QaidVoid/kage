@@ -565,7 +565,7 @@ fn untrusted_notice(summary: &kage_core::trust::TrustSummary) -> String {
     let mut ignored: Vec<String> = summary
         .keys
         .iter()
-        .filter(|key| !matches!(key.as_str(), "agents" | "skills"))
+        .filter(|key| !matches!(key.as_str(), "agents" | "skills" | "instructions"))
         .cloned()
         .collect();
     if !summary.agents.is_empty() {
@@ -573,6 +573,12 @@ fn untrusted_notice(summary: &kage_core::trust::TrustSummary) -> String {
     }
     if !summary.skills.is_empty() {
         ignored.push(format!("skills ({})", summary.skills.join(", ")));
+    }
+    if !summary.instructions.is_empty() {
+        ignored.push(format!(
+            "instructions ({})",
+            summary.instructions.join(", ")
+        ));
     }
     let head = format!(
         "project settings ignored because the project is not trusted: {}",
@@ -831,6 +837,7 @@ mod tests {
             items: Vec::new(),
             agents: vec!["reviewer".to_owned()],
             skills: vec!["helper".to_owned()],
+            instructions: Vec::new(),
             digest: String::new(),
             changes: Vec::new(),
         };
@@ -842,6 +849,28 @@ mod tests {
     }
 
     #[test]
+    fn untrusted_notice_names_instruction_files() {
+        let mut summary = kage_core::trust::TrustSummary {
+            keys: vec!["instructions".to_owned()],
+            instructions: vec![".kage/AGENTS.md".to_owned(), ".agents/AGENTS.md".to_owned()],
+            ..Default::default()
+        };
+        assert_eq!(
+            untrusted_notice(&summary),
+            "project settings ignored because the project is not trusted: instructions \
+             (.kage/AGENTS.md, .agents/AGENTS.md). Run `kage trust` here and restart to use them."
+        );
+        summary.changes.push(kage_core::trust::TrustChange {
+            line: "project instructions `.agents/AGENTS.md` content changed".to_owned(),
+            diff: Some("--- approved\n+++ current".to_owned()),
+        });
+        let notice = untrusted_notice(&summary);
+        assert!(notice.contains("project instructions `.agents/AGENTS.md` content changed"));
+        assert!(notice.contains("restart to see the diff"));
+        assert!(!notice.contains("--- approved"));
+    }
+
+    #[test]
     fn untrusted_notice_lists_changes_and_points_at_the_full_diff() {
         let summary = kage_core::trust::TrustSummary {
             path: PathBuf::from("/p/.kage"),
@@ -849,6 +878,7 @@ mod tests {
             items: Vec::new(),
             agents: Vec::new(),
             skills: vec!["helper".to_owned()],
+            instructions: Vec::new(),
             digest: String::new(),
             changes: vec![kage_core::trust::TrustChange {
                 line: "project skill `helper` content changed".to_owned(),

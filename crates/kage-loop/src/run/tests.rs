@@ -11,6 +11,8 @@ use super::*;
 use crate::NoopHooks;
 use crate::test_support::{Meet, MeetTool};
 
+mod tool_pairs;
+
 /// Portable absolute workdir for loop tests, unique per test name. A
 /// literal `/tmp` is not absolute on Windows, where it lacks a drive.
 fn temp_workdir(name: &str) -> std::path::PathBuf {

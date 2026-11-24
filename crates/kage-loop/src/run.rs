@@ -15,7 +15,6 @@
 //! }
 //! ```
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -570,7 +569,7 @@ fn build_request(
     } else {
         strip_thinking(&cx.history)
     };
-    let mut req = StreamRequest::new(&cx.model, close_unanswered_calls(history));
+    let mut req = StreamRequest::new(&cx.model, repair_tool_pairs(history));
     if !cx.system_prompt.is_empty() {
         req.system = Some(cx.system_prompt.clone());
     }
@@ -591,33 +590,11 @@ fn build_request(
 /// What a call that never got a result answers with in a request.
 const INTERRUPTED: &str = "Interrupted: kage stopped before this call finished.";
 
-/// `history` with a failed result after every tool call that has none.
-/// A session that kage quit in the middle of a call (a swarm member
-/// reopened for a retry, a resumed main session) still ends on that
-/// call, and providers refuse a call without its result. The stored
-/// history keeps the gap, which clients show as an interrupted call.
-fn close_unanswered_calls(history: Vec<Arc<Message>>) -> Vec<Arc<Message>> {
-    let answered: HashSet<&ToolCallId> = history
-        .iter()
-        .flat_map(|message| &message.content)
-        .filter_map(|content| match content {
-            Content::ToolResultBlock { call_id, .. } => Some(call_id),
-            _ => None,
-        })
-        .collect();
-    let unanswered = |message: &Message| -> Vec<ToolCallId> {
-        message
-            .content
-            .iter()
-            .filter_map(|content| match content {
-                Content::ToolCall { id, .. } if !answered.contains(id) => Some(id.clone()),
-                _ => None,
-            })
-            .collect()
-    };
-    if history.iter().all(|message| unanswered(message).is_empty()) {
-        return history;
-    }
+/// Pair each assistant's calls with the following run of tool results.
+/// Orphan and duplicate results are omitted with their attached media;
+/// unanswered calls receive interrupted results before the next message.
+/// Only the outgoing request changes, not the stored history.
+fn repair_tool_pairs(history: Vec<Arc<Message>>) -> Vec<Arc<Message>> {
     let mut closed = Vec::with_capacity(history.len() + 1);
     let mut open: Vec<ToolCallId> = Vec::new();
     let mut parent = None;
@@ -635,15 +612,49 @@ fn close_unanswered_calls(history: Vec<Arc<Message>>) -> Vec<Arc<Message>> {
                 ))
             }));
         };
-    for message in &history {
-        if message.role != Role::ToolResult {
-            close(&mut open, parent, &mut closed);
+    for message in history {
+        if message.role == Role::ToolResult {
+            let mut keep = false;
+            let content: Vec<_> = message
+                .content
+                .iter()
+                .filter(|block| {
+                    if let Content::ToolResultBlock { call_id, .. } = block {
+                        keep = if let Some(index) = open.iter().position(|id| id == call_id) {
+                            open.remove(index);
+                            true
+                        } else {
+                            false
+                        };
+                    }
+                    keep
+                })
+                .collect();
+            if !content.is_empty() {
+                closed.push(if content.len() == message.content.len() {
+                    message
+                } else {
+                    Arc::new(Message {
+                        content: content.into_iter().cloned().collect(),
+                        ..*message
+                    })
+                });
+            }
+            continue;
         }
+        close(&mut open, parent, &mut closed);
         if message.role == Role::Assistant {
-            open = unanswered(message);
+            open = message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    Content::ToolCall { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect();
             parent = Some(message.id);
         }
-        closed.push(Arc::clone(message));
+        closed.push(message);
     }
     close(&mut open, parent, &mut closed);
     closed

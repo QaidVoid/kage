@@ -581,6 +581,7 @@ impl App {
                 .map(|t| ms(t.elapsed())),
             tokens: usage.total_tokens(),
             cost: usage.total_cost,
+            cost_status: usage.cost_status,
         }];
         rows.extend(self.agents.under(main).into_iter().map(|(depth, node)| {
             let state = match node.state {
@@ -608,6 +609,7 @@ impl App {
                 elapsed_ms: node.elapsed().map(ms),
                 tokens: node.usage.total.input + node.usage.total.output,
                 cost: node.usage.cost,
+                cost_status: node.usage.cost_status,
             }
         }));
         rows

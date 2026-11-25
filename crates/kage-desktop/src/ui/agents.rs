@@ -202,8 +202,10 @@ pub struct AgentFacts {
     pub elapsed: Option<Duration>,
     /// The tokens it read and wrote, once it reported any.
     pub tokens: Option<u64>,
-    /// What it cost in USD, once priced.
+    /// Its reported USD amount, which may be a partial subtotal.
     pub cost: Option<f64>,
+    /// Pricing quality of the reported USD amount.
+    pub cost_status: kage_client::wire::CostStatus,
     /// The model it runs.
     pub model: Option<String>,
     /// Its latest tool line, while it works.
@@ -285,7 +287,8 @@ pub fn agent_facts(store: &Store, parent: &Session, id: &str, agent: &Subagent) 
             .map(|usage| usage.input + usage.output)
             .or_else(|| child.map(|child| child.usage.used))
             .filter(|used| *used > 0),
-        cost: usage.map(|usage| usage.cost).filter(|cost| *cost > 0.0),
+        cost: usage.map(|usage| usage.cost),
+        cost_status: usage.map(|usage| usage.cost_status).unwrap_or_default(),
         model: agent.model.clone(),
         last,
         result,
@@ -397,7 +400,7 @@ pub fn avatar_tile(name: &str) -> String {
 }
 
 /// The meta line a card carries under its title: the elapsed time, the
-/// tokens, the cost and the model, each dropped when unknown.
+/// tokens, the qualified cost and the model, each omitted when absent.
 #[must_use]
 pub fn meta_line(facts: &AgentFacts) -> String {
     let mut parts = Vec::new();
@@ -407,8 +410,8 @@ pub fn meta_line(facts: &AgentFacts) -> String {
     if let Some(tokens) = facts.tokens {
         parts.push(format!("{} tok", tokens_of(tokens)));
     }
-    if let Some(cost) = facts.cost {
-        parts.push(format!("${cost:.4}"));
+    if let Some(cost) = crate::cost::label(facts.cost, "$", 4, facts.cost_status) {
+        parts.push(cost);
     }
     if let Some(model) = &facts.model {
         parts.push(model.clone());
@@ -794,6 +797,7 @@ mod tests {
             elapsed: Some(std::time::Duration::from_secs(45)),
             tokens: None,
             cost: None,
+            cost_status: Default::default(),
             model: None,
             last: None,
             result: None,
@@ -810,6 +814,37 @@ mod tests {
     }
 
     #[test]
+    fn agent_cost_labels_keep_quality_and_known_zero() {
+        use kage_client::wire::{CostStatus, SubagentUsage};
+
+        let store = crate::store::Store::new(".", false);
+        let parent = Session::default();
+        let mut agent = agent(None, None);
+        agent.usage = Some(SubagentUsage {
+            cost: 1.2,
+            cost_status: CostStatus::Estimated,
+            ..Default::default()
+        });
+        let facts = super::agent_facts(&store, &parent, "c1", &agent);
+        assert_eq!(facts.cost_status, CostStatus::Estimated);
+        assert_eq!(meta_line(&facts), "~$1.2000");
+        agent.usage.as_mut().unwrap().cost_status = CostStatus::Incomplete;
+        let facts = super::agent_facts(&store, &parent, "c1", &agent);
+        assert_eq!(meta_line(&facts), "$1.2000 (partial)");
+        agent.usage.as_mut().unwrap().cost = 0.0;
+        let facts = super::agent_facts(&store, &parent, "c1", &agent);
+        assert_eq!(meta_line(&facts), "cost unknown");
+        agent.usage.as_mut().unwrap().cost_status = CostStatus::Recorded;
+        let facts = super::agent_facts(&store, &parent, "c1", &agent);
+        assert_eq!(facts.cost, Some(0.0));
+        assert_eq!(meta_line(&facts), "$0.0000");
+        agent.usage = None;
+        let facts = super::agent_facts(&store, &parent, "c1", &agent);
+        assert_eq!(facts.cost_status, CostStatus::Recorded);
+        assert_eq!(meta_line(&facts), "");
+    }
+
+    #[test]
     fn the_swarm_counts_split_the_members() {
         let facts = |phase| AgentFacts {
             id: "s1".to_owned(),
@@ -820,6 +855,7 @@ mod tests {
             elapsed: None,
             tokens: None,
             cost: None,
+            cost_status: Default::default(),
             model: None,
             last: None,
             result: None,

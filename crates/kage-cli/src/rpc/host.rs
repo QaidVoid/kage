@@ -978,6 +978,7 @@ fn session_spec(
         id,
         model,
         cx,
+        initial_usage: None,
         recorder: None,
         tools,
         gate: PermissionGate::new(config.permissions)
@@ -1038,6 +1039,7 @@ mod tests {
                     id,
                     model: "mock/m".to_owned(),
                     cx: AgentContext::new("mock/m", "").with_workdir(cwd),
+                    initial_usage: None,
                     recorder: None,
                     tools: builtin_registry(),
                     gate: PermissionGate::new(PermissionsConfig::default()),

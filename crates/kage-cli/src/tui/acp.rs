@@ -3603,6 +3603,20 @@ impl Pump {
             context_used: usage.used,
             context_window: usage.size,
             cost: usage.cost.as_ref().map_or(0.0, |cost| cost.amount),
+            cost_status: match usage.cost_status() {
+                _ if usage.cost.is_none()
+                    && (usage.used > 0
+                        || tokens.input > 0
+                        || tokens.output > 0
+                        || tokens.cache_read > 0
+                        || tokens.cache_write > 0) =>
+                {
+                    kage_core::CostStatus::Incomplete
+                }
+                kage_client::wire::CostStatus::Recorded => kage_core::CostStatus::Recorded,
+                kage_client::wire::CostStatus::Estimated => kage_core::CostStatus::Estimated,
+                kage_client::wire::CostStatus::Incomplete => kage_core::CostStatus::Incomplete,
+            },
             context_estimated: false,
         }
     }
@@ -5468,6 +5482,58 @@ mod tests {
     use std::time::Duration;
 
     use kage_client::RequestId;
+
+    #[test]
+    fn usage_mirror_preserves_cost_quality_and_legacy_defaults() {
+        use kage_client::wire::{Cost, CostStatus, UsageTokens};
+        for (wire, core) in [
+            (CostStatus::Recorded, kage_core::CostStatus::Recorded),
+            (CostStatus::Estimated, kage_core::CostStatus::Estimated),
+            (CostStatus::Incomplete, kage_core::CostStatus::Incomplete),
+        ] {
+            for amount in [Some(1.25), Some(0.0), None] {
+                let usage = kage_client::Usage {
+                    cost: amount.map(|amount| Cost {
+                        amount,
+                        currency: "USD".to_owned(),
+                    }),
+                    tokens: Some(UsageTokens {
+                        cost_status: wire,
+                        ..UsageTokens::default()
+                    }),
+                    ..kage_client::Usage::default()
+                };
+                let mirrored = Pump::usage_of(&usage);
+                assert!((mirrored.cost - amount.unwrap_or_default()).abs() < f64::EPSILON);
+                assert_eq!(mirrored.cost_status, core);
+            }
+        }
+        assert_eq!(
+            Pump::usage_of(&kage_client::Usage::default()).cost_status,
+            kage_core::CostStatus::Recorded
+        );
+        let tokens: UsageTokens = serde_json::from_value(serde_json::json!({
+            "input": 1, "output": 2, "cacheRead": 0, "cacheWrite": 0
+        }))
+        .unwrap();
+        assert_eq!(
+            Pump::usage_of(&kage_client::Usage {
+                tokens: Some(tokens),
+                ..kage_client::Usage::default()
+            })
+            .cost_status,
+            kage_core::CostStatus::Incomplete
+        );
+        assert_eq!(
+            Pump::usage_of(&kage_client::Usage {
+                used: 3,
+                size: 100,
+                ..kage_client::Usage::default()
+            })
+            .cost_status,
+            kage_core::CostStatus::Incomplete
+        );
+    }
 
     /// Writes a child that echoes every line back and then ignores
     /// stdin EOF, standing in for `kage rpc`. Hanging past EOF is the

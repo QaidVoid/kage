@@ -15,13 +15,13 @@
 //! [`find_by_prefix`] and [`find_last`] resolve a session file path from a
 //! directory either by id prefix or by most-recent header timestamp.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use kage_core::protocol::{CompactionRecord, TimelineItem};
-use kage_core::{Content, Message, MessageId, Role, TokenUsage};
+use kage_core::{Content, CostStatus, Message, MessageId, Role, TokenUsage};
 
 use crate::entry::{Compaction, Header, MessageEntry, SessionEntry};
 use crate::error::SessionError;
@@ -53,6 +53,9 @@ pub struct ReplayResult {
     /// `kage-core` types in result-only positions; the host folds it
     /// into `AgentContext::budget` on resume.
     pub usage_total: ReplayUsage,
+    /// Billable usage and saved dollar estimates belonging to this session.
+    /// Forked agents exclude the context inherited before their own marker.
+    pub accounting: ReplayAccounting,
     /// Wire identifier of the most recent
     /// [`SessionEntry::ThinkingLevelChange`], or `None` if the session
     /// never recorded one. The host parses it back into a
@@ -87,6 +90,54 @@ impl ReplayResult {
             .chain(&self.history)
             .map(AsRef::as_ref)
     }
+}
+
+/// Billable totals reconstructed from the selected session ancestry.
+///
+/// Saved known amounts are never repriced. Legacy usage is grouped by its
+/// historical model so the host can estimate it using current pricing.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ReplayAccounting {
+    /// Charged tokens belonging to this session, excluding an agent's prefix.
+    pub usage: TokenUsage,
+    /// Subtotal of saved known USD estimates, without legacy estimates.
+    pub cost: f64,
+    /// Quality of the subtotal and any legacy usage awaiting estimation.
+    pub cost_status: CostStatus,
+    /// Usage without a cost annotation, keyed by canonical historical model.
+    pub legacy_usage: BTreeMap<String, TokenUsage>,
+}
+
+impl ReplayAccounting {
+    fn record(&mut self, usage: Option<TokenUsage>, cost: Option<crate::UsageCost>, model: &str) {
+        if let Some(usage) = usage {
+            add_usage(&mut self.usage, usage);
+        } else {
+            self.cost_status = CostStatus::Incomplete;
+        }
+        match cost {
+            Some(cost) => match cost.amount {
+                Some(amount) => self.cost += amount,
+                None => self.cost_status = CostStatus::Incomplete,
+            },
+            None => {
+                if let Some(usage) = usage {
+                    add_usage(
+                        self.legacy_usage.entry(model.to_owned()).or_default(),
+                        usage,
+                    );
+                    self.cost_status = self.cost_status.merge(CostStatus::Estimated);
+                }
+            }
+        }
+    }
+}
+
+fn add_usage(total: &mut TokenUsage, usage: TokenUsage) {
+    total.input = total.input.saturating_add(usage.input);
+    total.output = total.output.saturating_add(usage.output);
+    total.cache_read = total.cache_read.saturating_add(usage.cache_read);
+    total.cache_write = total.cache_write.saturating_add(usage.cache_write);
 }
 
 /// Cumulative token totals replayed from a session file, plus the
@@ -192,6 +243,10 @@ pub(crate) fn replay_file(path: &Path, file: std::fs::File) -> Result<ReplayResu
 /// # Errors
 ///
 /// As [`replay`], for an external session.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered pass keeps history and accounting on the same branch"
+)]
 pub fn replay_tree(path: &Path, tree: SessionTree) -> Result<ReplayResult, SessionError> {
     let (header, entries) = tree.into_active();
     if header.backend.is_some() {
@@ -205,6 +260,11 @@ pub fn replay_tree(path: &Path, tree: SessionTree) -> Result<ReplayResult, Sessi
     }
 
     let mut model = kage_core::canonical_model(&header.model);
+    let mut accounting_model = model.clone();
+    let mut accounting = ReplayAccounting::default();
+    let mut pending_cost: Option<crate::UsageCost> = None;
+    let parent = header.parent_session.map(|parent| parent.to_string());
+    let mut own_marker_seen = false;
     let mut thinking_level: Option<String> = None;
     let mut title: Option<String> = None;
     let mut swarm_mode: Option<bool> = None;
@@ -226,9 +286,13 @@ pub fn replay_tree(path: &Path, tree: SessionTree) -> Result<ReplayResult, Sessi
     // message fills it in.
     let mut pending_after: Option<usize> = None;
     for entry in entries {
+        let cost = pending_cost.take().filter(|cost| cost.entry == entry.id());
         match entry {
             SessionEntry::Header(_) | SessionEntry::Branch(_) | SessionEntry::Label(_) => {}
             SessionEntry::Message(m) => {
+                if m.message.role == Role::Assistant || m.usage.is_some() {
+                    accounting.record(m.usage, cost, &accounting_model);
+                }
                 if let Some(u) = m.usage {
                     usage_total.add(u);
                     let fill = u
@@ -270,10 +334,27 @@ pub fn replay_tree(path: &Path, tree: SessionTree) -> Result<ReplayResult, Sessi
                 let at = timeline.len() - 1;
                 pending_after = Some(at);
             }
-            SessionEntry::ModelChange(mc) => model = kage_core::canonical_model(&mc.model),
+            SessionEntry::ModelChange(mc) => {
+                model = kage_core::canonical_model(&mc.model);
+                accounting_model.clone_from(&model);
+            }
             SessionEntry::ThinkingLevelChange(t) => thinking_level = Some(t.level),
             SessionEntry::Title(t) => title = Some(t.title),
             SessionEntry::Custom(c) => {
+                if !own_marker_seen
+                    && crate::list::is_agent_marker(&c)
+                    && parent.is_some()
+                    && c.data.get("parent").and_then(serde_json::Value::as_str) == parent.as_deref()
+                {
+                    accounting = ReplayAccounting::default();
+                    accounting_model = kage_core::canonical_model(&header.model);
+                    own_marker_seen = true;
+                }
+                pending_cost =
+                    crate::UsageCost::from_custom(&c).map_err(|source| SessionError::Io {
+                        path: path.to_path_buf(),
+                        source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+                    })?;
                 let rejected =
                     crate::RejectedUsage::from_custom(&c).map_err(|source| SessionError::Io {
                         path: path.to_path_buf(),
@@ -281,6 +362,7 @@ pub fn replay_tree(path: &Path, tree: SessionTree) -> Result<ReplayResult, Sessi
                     })?;
                 if let Some(rejected) = rejected {
                     usage_total.add(rejected.usage);
+                    accounting.record(Some(rejected.usage), cost, &accounting_model);
                 }
                 read_mode(&c, &mut swarm_mode, &mut plan_mode);
             }
@@ -293,6 +375,7 @@ pub fn replay_tree(path: &Path, tree: SessionTree) -> Result<ReplayResult, Sessi
         model,
         tool_durations,
         usage_total,
+        accounting,
         thinking_level,
         title,
         swarm_mode,

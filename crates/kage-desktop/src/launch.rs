@@ -1806,8 +1806,7 @@ impl ShellApp {
         });
         let cost = store
             .active_id()
-            .and_then(|id| store.tree_cost(id))
-            .map(|cost| format!("{} {:.2}", cost.currency, cost.amount));
+            .and_then(|id| crate::cost::tree_label(store, id, 2));
         let connect = self.shell.store.connect();
         let link = if connect.is_connected() {
             self.shell.transport.link().name.to_owned()

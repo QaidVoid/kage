@@ -370,46 +370,73 @@ impl Store {
     /// per currency heard; a tree that mixes currencies has several.
     #[must_use]
     pub fn tree_costs(&self, id: &str) -> Vec<kage_client::wire::Cost> {
-        let state = self.state();
-        let under = |session: &str| {
-            let mut parent = state.session(session).and_then(|s| s.parent.as_deref());
-            while let Some(at) = parent {
-                if at == id {
-                    return true;
-                }
-                parent = state.session(at).and_then(|s| s.parent.as_deref());
-            }
-            false
-        };
         let mut totals: Vec<kage_client::wire::Cost> = Vec::new();
-        for (session_id, session) in &state.sessions {
-            if session_id != id && !under(session_id) {
+        for (cost, _) in self.tree_usage(id) {
+            let Some(cost) = cost else {
                 continue;
+            };
+            match totals.iter_mut().find(|sum| sum.currency == cost.currency) {
+                Some(sum) => sum.amount += cost.amount,
+                None => totals.push(cost),
             }
-            let reported = session
-                .parent
-                .as_deref()
-                .and_then(|parent| {
+        }
+        totals
+    }
+
+    /// The least complete pricing quality in the session's agent tree.
+    /// Reported agent usage takes precedence over its session updates,
+    /// including when an unpriced session has no monetary amount.
+    #[must_use]
+    pub fn tree_cost_status(&self, id: &str) -> kage_client::wire::CostStatus {
+        self.tree_usage(id).fold(
+            kage_client::wire::CostStatus::default(),
+            |status, (_, next)| status.merge(next),
+        )
+    }
+
+    fn tree_usage<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> impl Iterator<
+        Item = (
+            Option<kage_client::wire::Cost>,
+            kage_client::wire::CostStatus,
+        ),
+    > + 'a {
+        let state = self.state();
+        state
+            .sessions
+            .iter()
+            .filter_map(move |(session_id, session)| {
+                if session_id != id {
+                    let mut parent = session.parent.as_deref();
+                    while let Some(at) = parent {
+                        if at == id {
+                            break;
+                        }
+                        parent = state.session(at).and_then(|s| s.parent.as_deref());
+                    }
+                    parent?;
+                }
+                let reported = session.parent.as_deref().and_then(|parent| {
                     state
                         .session(parent)?
                         .agents
                         .get(session_id)?
                         .usage
                         .as_ref()
-                })
-                .map(|usage| kage_client::wire::Cost {
-                    amount: usage.cost,
-                    currency: "USD".to_owned(),
                 });
-            let Some(cost) = reported.as_ref().or(session.usage.cost.as_ref()) else {
-                continue;
-            };
-            match totals.iter_mut().find(|sum| sum.currency == cost.currency) {
-                Some(sum) => sum.amount += cost.amount,
-                None => totals.push(cost.clone()),
-            }
-        }
-        totals
+                Some(match reported {
+                    Some(usage) => (
+                        Some(kage_client::wire::Cost {
+                            amount: usage.cost,
+                            currency: "USD".to_owned(),
+                        }),
+                        usage.cost_status,
+                    ),
+                    None => (session.usage.cost.clone(), session.usage.cost_status()),
+                })
+            })
     }
 
     /// What session `id` and every agent under it have spent, when it
@@ -2904,6 +2931,147 @@ mod tests {
         ));
         let total = store.tree_cost("s1").expect("priced");
         assert!((total.amount - 3.5).abs() < 1e-9, "{}", total.amount);
+    }
+
+    #[test]
+    fn cost_status_defaults_to_recorded_and_preserves_known_free_usage() {
+        use kage_client::wire::CostStatus;
+
+        let mut store = welcome_store();
+        open_session(&mut store, 3, "s1");
+        assert_eq!(store.tree_cost_status("missing"), CostStatus::Recorded);
+        assert_eq!(store.tree_cost_status("s1"), CostStatus::Recorded);
+        assert!(store.tree_cost("s1").is_none());
+        store.absorb(Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({
+                "sessionId": "s1",
+                "update": usage_cost(0.0, "USD"),
+            }),
+        });
+        assert_eq!(store.tree_cost_status("s1"), CostStatus::Recorded);
+        assert_eq!(store.tree_cost("s1").unwrap().amount, 0.0);
+        assert_eq!(
+            crate::cost::tree_label(&store, "s1", 2).as_deref(),
+            Some("USD 0.00")
+        );
+    }
+
+    #[test]
+    fn cost_status_includes_unpriced_descendants_but_not_unrelated_sessions() {
+        use kage_client::wire::CostStatus;
+
+        let mut store = welcome_store();
+        open_session(&mut store, 3, "s1");
+        open_session(&mut store, 4, "other");
+        let update = |session: &str, update: serde_json::Value| Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({ "sessionId": session, "update": update }),
+        };
+        store.absorb(update(
+            "s1",
+            usage_with_status(Some(1.2), "USD", CostStatus::Estimated),
+        ));
+        store.absorb(update(
+            "other",
+            usage_with_status(None, "USD", CostStatus::Incomplete),
+        ));
+        assert_eq!(store.tree_cost_status("s1"), CostStatus::Estimated);
+        assert_eq!(
+            crate::cost::tree_label(&store, "s1", 2).as_deref(),
+            Some("~USD 1.20")
+        );
+        store.absorb(update(
+            "s1",
+            serde_json::json!({
+                "sessionUpdate": "subagent_update", "subagentSessionId": "c1",
+            }),
+        ));
+        store.absorb(update(
+            "c1",
+            serde_json::json!({
+                "sessionUpdate": "subagent_update", "subagentSessionId": "g1",
+            }),
+        ));
+        store.absorb(update(
+            "g1",
+            usage_with_status(None, "USD", CostStatus::Incomplete),
+        ));
+        assert_eq!(store.tree_cost_status("s1"), CostStatus::Incomplete);
+        assert_eq!(store.tree_cost_status("c1"), CostStatus::Incomplete);
+        assert_eq!(store.tree_cost_status("g1"), CostStatus::Incomplete);
+        assert_eq!(store.tree_cost("s1").unwrap().amount, 1.2);
+        assert!(store.tree_cost("c1").is_none());
+        assert_eq!(
+            crate::cost::tree_label(&store, "s1", 2).as_deref(),
+            Some("USD 1.20 (partial)")
+        );
+        assert_eq!(
+            crate::cost::tree_label(&store, "c1", 2).as_deref(),
+            Some("cost unknown")
+        );
+    }
+
+    #[test]
+    fn reported_cost_status_and_amount_override_the_child_together() {
+        use kage_client::wire::CostStatus;
+
+        let mut store = welcome_store();
+        open_session(&mut store, 3, "s1");
+        let update = |session: &str, update: serde_json::Value| Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({ "sessionId": session, "update": update }),
+        };
+        let reported = |amount: f64, status: CostStatus| {
+            serde_json::json!({
+                "sessionUpdate": "subagent_update", "subagentSessionId": "c1",
+                "usage": { "input": 1, "output": 1, "cost": amount, "costStatus": status },
+            })
+        };
+        store.absorb(update("s1", usage_cost(1.0, "USD")));
+        store.absorb(update(
+            "s1",
+            serde_json::json!({
+                "sessionUpdate": "subagent_update", "subagentSessionId": "c1",
+            }),
+        ));
+        store.absorb(update(
+            "c1",
+            usage_with_status(None, "EUR", CostStatus::Incomplete),
+        ));
+        assert_eq!(store.tree_cost_status("s1"), CostStatus::Incomplete);
+        store.absorb(update("s1", reported(2.0, CostStatus::Recorded)));
+        assert_eq!(store.tree_cost_status("s1"), CostStatus::Recorded);
+        assert_eq!(store.tree_cost_status("c1"), CostStatus::Recorded);
+        assert_eq!(store.tree_cost("s1").unwrap().amount, 3.0);
+        store.absorb(update("c1", usage_cost(9.0, "EUR")));
+        store.absorb(update("s1", reported(2.0, CostStatus::Estimated)));
+        assert_eq!(store.tree_cost_status("s1"), CostStatus::Estimated);
+        assert_eq!(store.tree_costs("s1").len(), 1);
+        assert_eq!(store.tree_cost("s1").unwrap().amount, 3.0);
+        store.absorb(update("s1", reported(0.0, CostStatus::Incomplete)));
+        assert_eq!(store.tree_cost_status("s1"), CostStatus::Incomplete);
+        assert_eq!(store.tree_cost_status("c1"), CostStatus::Incomplete);
+        assert_eq!(store.tree_cost("s1").unwrap().amount, 1.0);
+        assert_eq!(store.tree_cost("c1").unwrap().amount, 0.0);
+        assert_eq!(
+            crate::cost::tree_label(&store, "c1", 2).as_deref(),
+            Some("cost unknown")
+        );
+    }
+
+    fn usage_with_status(
+        amount: Option<f64>,
+        currency: &str,
+        status: kage_client::wire::CostStatus,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "sessionUpdate": "usage_update", "used": 10, "size": 100,
+            "cost": amount.map(|amount| serde_json::json!({ "amount": amount, "currency": currency })),
+            "_meta": { "kage": {
+                "input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "costStatus": status,
+            } },
+        })
     }
 
     #[test]

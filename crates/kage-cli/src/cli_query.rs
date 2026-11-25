@@ -126,6 +126,7 @@ pub(crate) fn run_resume(
     if let Some(out) = runtime_env::max_output_tokens_for(&registry, &model) {
         cx = cx.with_max_output_tokens(out);
     }
+    let initial_usage = crate::engine::usage_from_replay(&replay, &registry);
     cx.history = replay.history;
     cx.budget.used_input = replay.usage_total.input;
     cx.budget.used_output = replay.usage_total.output;
@@ -137,6 +138,7 @@ pub(crate) fn run_resume(
         &model,
         tools,
         cx,
+        Some(initial_usage),
         prompt.to_owned(),
         Some(writer),
         plugin_runtime,

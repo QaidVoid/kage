@@ -321,6 +321,7 @@ impl AgentTree {
             sum.total.cache_read += node.usage.total.cache_read;
             sum.total.cache_write += node.usage.total.cache_write;
             sum.cost += node.usage.cost;
+            sum.cost_status = sum.cost_status.merge(node.usage.cost_status);
         }
         sum
     }
@@ -1033,6 +1034,43 @@ mod tests {
         assert_eq!(sum.total.output, 20);
         assert!((sum.cost - 0.75).abs() < 1e-9);
         assert_eq!(tree.usage_under(grandchild).total.input, 0);
+    }
+
+    #[test]
+    fn usage_under_keeps_the_worst_descendant_cost_status() {
+        use crate::CostStatus;
+
+        let statuses = [
+            CostStatus::Recorded,
+            CostStatus::Estimated,
+            CostStatus::Incomplete,
+        ];
+        for (child_index, child_status) in statuses.into_iter().enumerate() {
+            for (grandchild_index, grandchild_status) in statuses.into_iter().enumerate() {
+                let mut tree = AgentTree::default();
+                let root = SessionId::new();
+                let child = spawn(&mut tree, root, "general");
+                let grandchild = spawn(&mut tree, child, "explore");
+                let unrelated = spawn(&mut tree, SessionId::new(), "other");
+                for (session, cost_status) in [
+                    (child, child_status),
+                    (grandchild, grandchild_status),
+                    (unrelated, CostStatus::Incomplete),
+                ] {
+                    let usage = Usage {
+                        cost: 0.25,
+                        cost_status,
+                        ..Usage::default()
+                    };
+                    tree.apply(&envelope(session, HostEvent::UsageUpdated { usage }));
+                }
+                let sum = tree.usage_under(root);
+                assert!((sum.cost - 0.5).abs() < 1e-12);
+                assert_eq!(sum.cost_status, statuses[child_index.max(grandchild_index)]);
+                assert_eq!(tree.usage_under(child).cost_status, grandchild_status);
+                assert_eq!(tree.usage_under(grandchild), Usage::default());
+            }
+        }
     }
 
     #[test]

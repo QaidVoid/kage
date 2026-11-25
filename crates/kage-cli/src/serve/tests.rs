@@ -102,6 +102,7 @@ fn test_host(scripts: Vec<Script>, workdir: &Path) -> Arc<Host> {
                     id,
                     model: model.to_owned(),
                     cx: AgentContext::new(model, "").with_workdir(&spec_workdir),
+                    initial_usage: None,
                     recorder: None,
                     tools: builtin_registry(),
                     gate: PermissionGate::new(PermissionsConfig::default()),

@@ -346,6 +346,7 @@ fn the_usage_snapshot_follows_the_focused_agent() {
         context_used: 2_000,
         context_window: 100_000,
         cost: 0.05,
+        cost_status: kage_core::CostStatus::Recorded,
         context_estimated: false,
     };
     send_to(
@@ -2385,4 +2386,80 @@ fn rejected_steering_returns_to_its_child_draft_after_focus_changes() {
     app.focus_agent(sibling);
     assert_eq!(app.input.text(), "sibling draft");
     assert!(app.input.attached().is_empty());
+}
+
+#[test]
+fn usage_updates_preserve_cost_quality_in_focused_and_aggregate_views() {
+    use kage_core::CostStatus;
+    use kage_core::protocol::{HostEvent, Usage};
+
+    let (mut app, _rx, events) = app_with_events();
+    feed(
+        &mut app,
+        &events,
+        vec![
+            HostEvent::UsageUpdated {
+                usage: Usage {
+                    cost: 1.0,
+                    cost_status: CostStatus::Estimated,
+                    ..Usage::default()
+                },
+            }
+            .into(),
+        ],
+    );
+    assert_eq!(app.main_usage().unwrap().cost_status, CostStatus::Estimated);
+    let child = spawn_agent(&mut app, &events, "priced-child", "general");
+    let nested = kage_core::SessionId::new();
+    send_to(
+        &mut app,
+        &events,
+        nested,
+        vec![
+            HostEvent::AgentSpawned {
+                parent: child,
+                tool_call_id: kage_core::ToolCallId::new("unknown-child"),
+                agent: "explore".into(),
+                description: "unknown pricing".into(),
+                swarm: None,
+                background: false,
+            }
+            .into(),
+        ],
+    );
+    for (session, cost, cost_status) in [
+        (child, 0.5, CostStatus::Recorded),
+        (nested, 0.0, CostStatus::Incomplete),
+    ] {
+        send_to(
+            &mut app,
+            &events,
+            session,
+            vec![
+                HostEvent::UsageUpdated {
+                    usage: Usage {
+                        cost,
+                        cost_status,
+                        ..Usage::default()
+                    },
+                }
+                .into(),
+            ],
+        );
+    }
+    let total = app.session_usage_snapshot().unwrap();
+    assert!((total.total_cost - 1.5).abs() < f64::EPSILON);
+    assert_eq!(total.cost_status, CostStatus::Incomplete);
+    let rows = app.agents_overlay_rows();
+    assert_eq!(rows[0].cost_status, CostStatus::Estimated);
+    assert_eq!(rows[1].cost_status, CostStatus::Recorded);
+    assert_eq!(rows[2].cost_status, CostStatus::Incomplete);
+    app.set_focus(Some(child));
+    let focused = app.session_usage_snapshot().unwrap();
+    assert!((focused.total_cost - 0.5).abs() < f64::EPSILON);
+    assert_eq!(focused.cost_status, CostStatus::Incomplete);
+    app.set_focus(Some(nested));
+    let focused = app.session_usage_snapshot().unwrap();
+    assert!(focused.total_cost.abs() < f64::EPSILON);
+    assert_eq!(focused.cost_status, CostStatus::Incomplete);
 }

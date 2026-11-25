@@ -446,7 +446,7 @@ mod tests {
             out.text,
             format!(
                 "<agent name=\"explore\" session=\"{id}\" state=\"completed\" model=\"demo/script\" \
-                 tools=\"0\" in=\"0\" out=\"0\" cache_read=\"0\" cache_write=\"0\" cost=\"0.0000\" \
+                 tools=\"0\" in=\"0\" out=\"0\" cache_read=\"0\" cache_write=\"0\" cost=\"0\" \
                  ctx=\"0\" win=\"0\" run_ms=\"0\">\n\
                  the answer\n</agent>"
             )
@@ -492,6 +492,7 @@ mod tests {
                 cache_write: 120,
             },
             cost: 0.5,
+            cost_status: kage_core::CostStatus::default(),
             context_used: 2_160,
             context_window: 200_000,
             context_estimated: false,
@@ -512,7 +513,7 @@ mod tests {
         assert!(
             header.ends_with(
                 "tools=\"2\" in=\"1200\" out=\"40\" cache_read=\"800\" \
-                 cache_write=\"120\" cost=\"0.5000\" ctx=\"2160\" win=\"200000\" \
+                 cache_write=\"120\" cost=\"0.5\" ctx=\"2160\" win=\"200000\" \
                  run_ms=\"4200\">"
             ),
             "{header}"

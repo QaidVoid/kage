@@ -1602,7 +1602,7 @@ fn agent_detail(
         facts.model.clone(),
         facts.elapsed.map(crate::clock::span),
         facts.tokens.map(|n| format!("{} tok", agents::tokens(n))),
-        facts.cost.map(|cost| format!("USD {cost:.4}")),
+        crate::cost::label(facts.cost, "USD", 4, facts.cost_status),
         Some(format!("{calls} tool calls")),
         facts.item.as_ref().map(|(item, _)| format!("item: {item}")),
     ]

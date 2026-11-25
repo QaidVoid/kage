@@ -18,6 +18,29 @@ where
 }
 
 #[test]
+fn usage_cost_status_defaults_and_roundtrips() {
+    use kage_core::protocol::Usage;
+
+    let recorded = serde_json::to_value(Usage::default()).unwrap();
+    assert!(recorded.get("cost_status").is_none());
+    let restored: Usage = serde_json::from_value(recorded.clone()).unwrap();
+    assert_eq!(restored, Usage::default());
+
+    let mut explicit_recorded = recorded.clone();
+    explicit_recorded["cost_status"] = "recorded".into();
+    let restored: Usage = serde_json::from_value(explicit_recorded).unwrap();
+    assert_eq!(restored.cost_status, kage_core::CostStatus::Recorded);
+    assert_eq!(serde_json::to_value(restored).unwrap(), recorded);
+
+    for status in ["estimated", "incomplete"] {
+        let mut value = recorded.clone();
+        value["cost_status"] = status.into();
+        let usage: Usage = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(usage).unwrap(), value);
+    }
+}
+
+#[test]
 fn message_roundtrips() {
     let msg = Message::new(Role::User, vec![Content::Text { text: "hi".into() }], None);
     roundtrip(&msg);

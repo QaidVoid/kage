@@ -432,6 +432,7 @@ impl super::Dispatcher {
             cx,
             recorder,
             None,
+            None,
             Vec::new(),
             Vec::new(),
             format!("new session: {}", short_id(new_id)),
@@ -473,6 +474,7 @@ impl super::Dispatcher {
                 return;
             }
         };
+        let initial_usage = super::usage_from_replay(&replay, &self.registry);
         let session = self.sessions.get_mut(&id).expect("session checked");
         let Some(idle) = session.idle.as_ref() else {
             return;
@@ -513,6 +515,7 @@ impl super::Dispatcher {
             new_id,
             cx,
             recorder,
+            Some(initial_usage),
             replay.title,
             replay.timeline,
             replay.compacted_agents,
@@ -560,12 +563,14 @@ impl super::Dispatcher {
         // reads from here on.
         let mut cx = idle.cx.clone();
         cx.history = stored.history;
+        let initial_usage = session.usage;
         let recorder = super::Recorder::new(writer, session.plugins.clone());
         self.reseat(
             id,
             new_id,
             cx,
             recorder,
+            Some(initial_usage),
             stored.title,
             stored.timeline,
             stored.compacted_agents,
@@ -720,6 +725,7 @@ impl super::Dispatcher {
                     return;
                 }
             };
+            let initial_usage = super::usage_from_replay(&replay, &self.registry);
             let mut fallback = None;
             if self.registry.resolve(&replay.model).is_ok() {
                 session.state.model.clone_from(&replay.model);
@@ -750,7 +756,8 @@ impl super::Dispatcher {
                 &session.state.model,
                 session.output_cap,
             );
-            session.usage = super::usage_of(&cx);
+            session.usage = initial_usage;
+            session.usage.context_window = cx.context_window;
             session.state.thinking = cx.thinking_level;
             super::fit_to_model(&mut session.state, &self.registry);
             session.thinking_changed = false;
@@ -899,6 +906,7 @@ impl super::Dispatcher {
         new: SessionId,
         mut cx: kage_loop::AgentContext,
         recorder: super::Recorder,
+        initial_usage: Option<kage_core::protocol::Usage>,
         title: Option<String>,
         timeline: Vec<kage_core::protocol::TimelineItem>,
         compacted_agents: Vec<Arc<kage_core::Message>>,
@@ -916,7 +924,8 @@ impl super::Dispatcher {
             &session.state.model,
             session.output_cap,
         );
-        session.usage = super::usage_of(&cx);
+        session.usage = initial_usage.unwrap_or_else(|| super::usage_of(&cx));
+        session.usage.context_window = cx.context_window;
         session.state.thinking = cx.thinking_level;
         super::fit_to_model(&mut session.state, &self.registry);
         session.thinking_changed = false;

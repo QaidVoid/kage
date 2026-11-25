@@ -447,6 +447,30 @@ Code and Kenari model changes too, not only the models.dev ones. Pass
 for an offline run, or set `KAGE_CATALOG_URL` to change it for every
 run.
 
+## usage and costs
+
+Native sessions save each accepted or rejected attempt's calculated USD
+estimate with its reported token usage and the model that ran it. Reopening
+uses those saved amounts, so later price changes, provider overrides, or
+switches between API credentials and a subscription do not reprice past
+attempts. Known free usage is recorded as zero; missing pricing is recorded
+as unknown. These are kage's estimates, not provider invoices.
+
+Older recordings without saved amounts are estimated using each recorded
+model's currently available prices. kage does not substitute the current
+execution model's price when an old model or its price is unavailable.
+The footer, `/usage`, and desktop cost labels distinguish:
+
+- `$1.20`: saved amounts with known pricing.
+- `~$1.20`: some amounts were estimated from older token records.
+- `$1.20 (partial)`: a subtotal with some usage unpriced.
+- `cost unknown`: usage exists but no dollar subtotal is known.
+
+Cost follows the selected branch through resume, clone, fork, and rewind.
+Compaction does not erase earlier charges. An agent's inherited conversation
+is context, not new spending by that agent, so its own billable totals begin
+when it starts. Parent displays can still include its children's own costs.
+
 ## thinking
 
 A session's thinking level is one of `off`, `minimal`, `low`,

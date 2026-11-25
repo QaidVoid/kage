@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use kage_core::{Modalities, ThinkingLevel};
+use kage_core::{CostStatus, Modalities, ThinkingLevel};
 
 /// Snapshot of one session's running token totals plus the active
 /// model and its context window, kept current from the engine's
@@ -52,9 +52,10 @@ pub struct SessionUsage {
     /// dispatch, or compaction). The modeline reads this to paint a
     /// spinner.
     pub working: bool,
-    /// Cumulative dollar cost across every turn this session. `0.0`
-    /// when the active model has no known price.
+    /// Cumulative known dollar cost across every turn this session.
     pub total_cost: f64,
+    /// Whether the cost is recorded, estimated, or missing some usage.
+    pub cost_status: CostStatus,
     /// Thinking level the next run sends. `None` (and `Some(Off)`)
     /// leave the footer pill suppressed; the renderer draws
     /// `thinking <level>` for any other variant.
@@ -91,6 +92,15 @@ impl SessionUsage {
     #[must_use]
     pub fn total_tokens(&self) -> u64 {
         self.input_tokens.saturating_add(self.output_tokens)
+    }
+}
+
+pub(crate) fn cost_label(cost: f64, status: CostStatus) -> String {
+    match status {
+        CostStatus::Recorded => format!("${cost:.2}"),
+        CostStatus::Estimated => format!("~${cost:.2}"),
+        CostStatus::Incomplete if cost > 0.0 => format!("${cost:.2} (partial)"),
+        CostStatus::Incomplete => "cost unknown".to_owned(),
     }
 }
 

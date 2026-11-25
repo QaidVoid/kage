@@ -4,6 +4,11 @@
 
 ### Upgrade Notes
 
+- Native sessions retain per-attempt cost estimates on reopen, including
+  rejected attempts. Older token-only recordings use current per-model
+  prices and show estimated or incomplete totals. Saved amounts are not
+  repriced when models, credentials, or provider configuration change.
+
 - Empty, whitespace-only, and reasoning-only provider turns no longer end
   runs successfully. Normal endings and tool-use endings retry within
   `loop.max_provider_retries`; unusable responses stopped for other reasons

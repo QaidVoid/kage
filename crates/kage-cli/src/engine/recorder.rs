@@ -8,18 +8,24 @@ use kage_core::{LoopEvent, Message, Role, TokenUsage};
 use kage_plugin::{PendingSessionOp, session_plugins::SessionPlugins};
 use kage_session::{
     Compaction, Custom, EntryId, Header, Label, MessageEntry, ModelChange, RejectedUsage,
-    SessionEntry, SessionError, SessionWriter,
+    SessionEntry, SessionError, SessionWriter, UsageCost,
 };
 
-/// Writes appended messages, compactions, and rejected-attempt usage for one session.
+/// Writes appended messages, compactions, and per-attempt accounting for one session.
 ///
-/// Assistant messages carry the usage of the `MessageEnd` that preceded
-/// them. Plugin session operations queued during a turn are written when
-/// the turn ends.
+/// Assistant messages carry the usage and captured cost of the `MessageEnd`
+/// that preceded them. Plugin session operations queued during a turn are
+/// written when the turn ends.
 pub(crate) struct Recorder {
     target: Target,
     plugins: Option<Arc<dyn SessionPlugins>>,
-    turn_usage: Option<TokenUsage>,
+    turn_usage: Option<PendingUsage>,
+}
+
+struct PendingUsage {
+    usage: TokenUsage,
+    model: String,
+    amount: Option<f64>,
 }
 
 enum Target {
@@ -107,28 +113,67 @@ impl Recorder {
         }
     }
 
-    /// Persist durable events, keeping rejected usage separate from message usage.
-    pub(crate) fn observe(&mut self, event: &LoopEvent) -> Result<(), SessionError> {
+    /// Persist durable events with their captured qualified model and USD cost.
+    pub(crate) fn observe(
+        &mut self,
+        event: &LoopEvent,
+        model: &str,
+        amount: Option<f64>,
+    ) -> Result<(), SessionError> {
         match event {
-            LoopEvent::RejectedUsage { usage } => self
-                .writer()?
-                .append(&RejectedUsage { usage: *usage }.into_entry(EntryId::new(), Utc::now())),
+            LoopEvent::RejectedUsage { usage } => {
+                let id = EntryId::new();
+                let ts = Utc::now();
+                let cost = UsageCost {
+                    entry: id,
+                    model: model.to_owned(),
+                    amount,
+                }
+                .into_entry(EntryId::new(), ts)
+                .map_err(|source| SessionError::Encode {
+                    path: self.path().to_path_buf(),
+                    source,
+                })?;
+                self.writer()?
+                    .append_many(&[cost, RejectedUsage { usage: *usage }.into_entry(id, ts)])
+            }
             LoopEvent::MessageEnd { usage, .. } => {
-                self.turn_usage = Some(*usage);
+                self.turn_usage = Some(PendingUsage {
+                    usage: *usage,
+                    model: model.to_owned(),
+                    amount,
+                });
                 Ok(())
             }
             LoopEvent::MessageAppended { message } => {
-                let usage = if message.role == Role::Assistant {
+                let pending = if message.role == Role::Assistant {
                     self.turn_usage.take()
                 } else {
                     None
                 };
-                self.writer()?.append(&SessionEntry::Message(MessageEntry {
-                    id: EntryId::new(),
-                    ts: Utc::now(),
+                let id = EntryId::new();
+                let ts = Utc::now();
+                let entry = SessionEntry::Message(MessageEntry {
+                    id,
+                    ts,
                     message: message.clone(),
-                    usage,
-                }))
+                    usage: pending.as_ref().map(|pending| pending.usage),
+                });
+                if let Some(pending) = pending {
+                    let cost = UsageCost {
+                        entry: id,
+                        model: pending.model,
+                        amount: pending.amount,
+                    }
+                    .into_entry(EntryId::new(), ts)
+                    .map_err(|source| SessionError::Encode {
+                        path: self.path().to_path_buf(),
+                        source,
+                    })?;
+                    self.writer()?.append_many(&[cost, entry])
+                } else {
+                    self.writer()?.append(&entry)
+                }
             }
             LoopEvent::Compaction {
                 kept,
@@ -243,13 +288,19 @@ mod tests {
         let (path, header) = header(dir.path());
         let mut recorder = Recorder::planned(path.clone(), header, None);
         recorder
-            .observe(&LoopEvent::TurnEnded {
-                index: 0,
-                had_tool_calls: false,
-            })
+            .observe(
+                &LoopEvent::TurnEnded {
+                    index: 0,
+                    had_tool_calls: false,
+                },
+                "mock/m",
+                None,
+            )
             .unwrap();
         assert!(!path.exists());
-        recorder.observe(&appended(Role::User, "hi")).unwrap();
+        recorder
+            .observe(&appended(Role::User, "hi"), "mock/m", None)
+            .unwrap();
         assert_eq!(entries(&path).len(), 2);
     }
 
@@ -262,23 +313,35 @@ mod tests {
             input: 7,
             ..TokenUsage::default()
         };
-        recorder.observe(&appended(Role::User, "q")).unwrap();
         recorder
-            .observe(&LoopEvent::MessageEnd {
-                id: MessageId::new(),
-                usage,
-                stop_reason: StopReason::EndTurn,
-            })
+            .observe(&appended(Role::User, "q"), "mock/m", None)
             .unwrap();
-        recorder.observe(&appended(Role::Assistant, "a")).unwrap();
         recorder
-            .observe(&LoopEvent::Compaction {
-                kept: 1,
-                summarized: 2,
-                summary: "s".into(),
-                before: 9_000,
-                estimate: 0,
-            })
+            .observe(
+                &LoopEvent::MessageEnd {
+                    id: MessageId::new(),
+                    usage,
+                    stop_reason: StopReason::EndTurn,
+                },
+                "mock/m",
+                None,
+            )
+            .unwrap();
+        recorder
+            .observe(&appended(Role::Assistant, "a"), "mock/m", None)
+            .unwrap();
+        recorder
+            .observe(
+                &LoopEvent::Compaction {
+                    kept: 1,
+                    summarized: 2,
+                    summary: "s".into(),
+                    before: 9_000,
+                    estimate: 0,
+                },
+                "mock/m",
+                None,
+            )
             .unwrap();
 
         let written = entries(&path);
@@ -294,6 +357,196 @@ mod tests {
     }
 
     #[test]
+    fn assistant_cost_is_staged_until_append_with_its_original_model_and_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, header) = header(dir.path());
+        let mut recorder = Recorder::planned(path.clone(), header, None);
+        let usage = TokenUsage {
+            input: 7,
+            output: 3,
+            cache_read: 11,
+            cache_write: 13,
+        };
+        recorder
+            .observe(
+                &LoopEvent::MessageEnd {
+                    id: MessageId::new(),
+                    usage,
+                    stop_reason: StopReason::EndTurn,
+                },
+                "actual/scoped/model",
+                Some(0.00641),
+            )
+            .unwrap();
+        assert!(!path.exists());
+        recorder
+            .observe(&appended(Role::User, "q"), "other/model", None)
+            .unwrap();
+        assert_eq!(entries(&path).len(), 2);
+        recorder
+            .observe(&appended(Role::Assistant, "a"), "other/model", None)
+            .unwrap();
+
+        let written = entries(&path);
+        assert_eq!(written.len(), 4);
+        let SessionEntry::Custom(custom) = &written[2] else {
+            panic!("cost must immediately precede its message");
+        };
+        let snapshot = UsageCost::from_custom(custom).unwrap().unwrap();
+        let SessionEntry::Message(message) = &written[3] else {
+            panic!("cost must target an accepted message");
+        };
+        assert_eq!(snapshot.entry, message.id);
+        assert_eq!(snapshot.model, "actual/scoped/model");
+        assert!((snapshot.amount.unwrap() - 0.00641).abs() < 1e-12);
+        assert_eq!(message.usage, Some(usage));
+    }
+
+    #[test]
+    fn invalid_cost_returns_an_encoding_error_without_creating_a_session() {
+        for amount in [f64::NAN, f64::INFINITY, -1.0] {
+            for accepted in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let (path, header) = header(dir.path());
+                let mut recorder = Recorder::planned(path.clone(), header, None);
+                let usage = TokenUsage::default();
+                let result = if accepted {
+                    recorder
+                        .observe(
+                            &LoopEvent::MessageEnd {
+                                id: MessageId::new(),
+                                usage,
+                                stop_reason: StopReason::EndTurn,
+                            },
+                            "mock/m",
+                            Some(amount),
+                        )
+                        .unwrap();
+                    recorder.observe(&appended(Role::Assistant, "a"), "mock/m", None)
+                } else {
+                    recorder.observe(&LoopEvent::RejectedUsage { usage }, "mock/m", Some(amount))
+                };
+                assert!(matches!(result, Err(SessionError::Encode { .. })));
+                assert!(!path.exists());
+            }
+        }
+    }
+
+    #[test]
+    fn accepted_usage_batch_still_externalizes_message_media() {
+        use base64::Engine as _;
+        use kage_core::MediaSource;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (path, header) = header(dir.path());
+        let mut recorder = Recorder::planned(path.clone(), header, None);
+        let bytes = vec![7_u8; kage_session::blobs::INLINE_MAX + 1];
+        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let message = Arc::new(Message::new(
+            Role::Assistant,
+            vec![Content::Image {
+                source: MediaSource::Base64 { data: data.clone() },
+                mime: "image/png".into(),
+            }],
+            None,
+        ));
+        recorder
+            .observe(
+                &LoopEvent::MessageEnd {
+                    id: message.id,
+                    usage: TokenUsage::default(),
+                    stop_reason: StopReason::EndTurn,
+                },
+                "mock/m",
+                None,
+            )
+            .unwrap();
+        recorder
+            .observe(&LoopEvent::MessageAppended { message }, "mock/m", None)
+            .unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains(&data));
+        let sha256 = kage_session::BlobStore::digest(&bytes);
+        assert!(raw.contains(&sha256));
+        assert_eq!(
+            kage_session::BlobStore::beside(&path).get(&sha256),
+            Some(bytes)
+        );
+        let written = entries(&path);
+        assert_eq!(written.len(), 3);
+        let SessionEntry::Message(message) = &written[2] else {
+            panic!("cost must precede the stored message");
+        };
+        assert!(matches!(
+            &message.message.content[0],
+            Content::Image { source: MediaSource::Base64 { data: restored }, .. }
+                if restored == &data
+        ));
+    }
+
+    #[test]
+    fn snapshots_distinguish_free_and_unknown_prices_for_every_attempt_kind() {
+        for amount in [None, Some(0.0)] {
+            let dir = tempfile::tempdir().unwrap();
+            let (path, header) = header(dir.path());
+            let mut recorder = Recorder::planned(path.clone(), header, None);
+            let usage = TokenUsage {
+                input: 7,
+                output: 3,
+                ..TokenUsage::default()
+            };
+            recorder
+                .observe(&LoopEvent::RejectedUsage { usage }, "mock/m", amount)
+                .unwrap();
+            recorder
+                .observe(
+                    &LoopEvent::MessageEnd {
+                        id: MessageId::new(),
+                        usage,
+                        stop_reason: StopReason::EndTurn,
+                    },
+                    "mock/m",
+                    amount,
+                )
+                .unwrap();
+            recorder
+                .observe(&appended(Role::Assistant, "a"), "mock/m", amount)
+                .unwrap();
+            let written = entries(&path);
+            assert_eq!(written.len(), 5);
+            for pair in written[1..].chunks_exact(2) {
+                let SessionEntry::Custom(custom) = &pair[0] else {
+                    panic!("each attempt must have a cost annotation");
+                };
+                let snapshot = UsageCost::from_custom(custom).unwrap().unwrap();
+                let target = match &pair[1] {
+                    SessionEntry::Custom(custom) => {
+                        assert!(RejectedUsage::from_custom(custom).unwrap().is_some());
+                        custom.id
+                    }
+                    SessionEntry::Message(message) => message.id,
+                    _ => panic!("cost must target usage"),
+                };
+                assert_eq!(snapshot.entry, target);
+                assert_eq!(snapshot.model, "mock/m");
+                assert_eq!(snapshot.amount, amount);
+            }
+            let replay = kage_session::replay(&path).unwrap();
+            assert!(replay.accounting.cost.abs() < f64::EPSILON);
+            assert_eq!(
+                replay.accounting.cost_status,
+                if amount.is_some() {
+                    kage_core::CostStatus::Recorded
+                } else {
+                    kage_core::CostStatus::Incomplete
+                }
+            );
+            assert!(replay.accounting.legacy_usage.is_empty());
+        }
+    }
+
+    #[test]
     fn rejected_usage_is_recorded_without_becoming_assistant_usage() {
         let dir = tempfile::tempdir().unwrap();
         let (path, header) = header(dir.path());
@@ -304,14 +557,16 @@ mod tests {
             cache_read: 11,
             cache_write: 13,
         };
-        recorder.observe(&appended(Role::User, "q")).unwrap();
         recorder
-            .observe(&LoopEvent::RejectedUsage { usage })
+            .observe(&appended(Role::User, "q"), "mock/m", None)
+            .unwrap();
+        recorder
+            .observe(&LoopEvent::RejectedUsage { usage }, "mock/m", None)
             .unwrap();
 
         let written = entries(&path);
-        assert_eq!(written.len(), 3);
-        let SessionEntry::Custom(custom) = &written[2] else {
+        assert_eq!(written.len(), 4);
+        let SessionEntry::Custom(custom) = &written[3] else {
             panic!("rejected usage must be an accounting entry");
         };
         assert_eq!(
@@ -326,7 +581,9 @@ mod tests {
         assert_eq!(replay.usage_total.cache_write, usage.cache_write);
         assert_eq!(replay.usage_total.last_context, 0);
 
-        recorder.observe(&appended(Role::Assistant, "a")).unwrap();
+        recorder
+            .observe(&appended(Role::Assistant, "a"), "mock/m", None)
+            .unwrap();
         assert!(matches!(
             entries(&path).last(),
             Some(SessionEntry::Message(message)) if message.usage.is_none()
@@ -340,7 +597,9 @@ mod tests {
         let mut recorder = Recorder::planned(path.clone(), header, None);
         recorder.set_model("mock:a").unwrap();
         assert!(!path.exists());
-        recorder.observe(&appended(Role::User, "hi")).unwrap();
+        recorder
+            .observe(&appended(Role::User, "hi"), "mock/m", None)
+            .unwrap();
         recorder.set_model("mock:b").unwrap();
 
         let written = entries(&path);
@@ -375,10 +634,14 @@ mod tests {
             Some(Arc::clone(&runtime) as Arc<dyn SessionPlugins>),
         );
         recorder
-            .observe(&LoopEvent::TurnEnded {
-                index: 0,
-                had_tool_calls: false,
-            })
+            .observe(
+                &LoopEvent::TurnEnded {
+                    index: 0,
+                    had_tool_calls: false,
+                },
+                "mock/m",
+                None,
+            )
             .unwrap();
 
         let written = entries(&path);

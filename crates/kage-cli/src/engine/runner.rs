@@ -12,8 +12,8 @@ use kage_core::agent_report::AgentLimit;
 use kage_core::protocol::{HostEvent, McpServerInfo, NoticeLevel, RunOutcome, Usage};
 use kage_core::sync::lock;
 use kage_core::{
-    CancelFlag, Content, LoopError, LoopEvent, Message, ModelCost, SessionId, TokenCost,
-    TokenUsage, ToolOutput,
+    CancelFlag, Content, CostStatus, LoopError, LoopEvent, Message, ModelCost, SessionId,
+    TokenCost, TokenUsage, ToolOutput,
 };
 use kage_loop::{AgentContext, Hooks, LoopConfig};
 use kage_mcp::expand::ExpandError;
@@ -239,13 +239,20 @@ impl Run {
         bus.publish(session, HostEvent::RunStarted);
         let started_at = Instant::now();
         let price = kage_provider::model_cost(provider.as_ref(), &cx.model);
+        let model = format!("{}/{}", provider.metadata().id, cx.model);
         let mut tool_names = HashMap::new();
         let mut emit = |event: LoopEvent| {
             if let Some(rt) = plugins.as_deref() {
                 crate::plugins::forward_event(rt, &event, &mut tool_names);
             }
+            let amount = match &event {
+                LoopEvent::MessageEnd { usage, .. } | LoopEvent::RejectedUsage { usage } => {
+                    attempt_cost(usage, price)
+                }
+                _ => None,
+            };
             if let Some(rec) = recorder.as_mut()
-                && let Err(err) = rec.observe(&event)
+                && let Err(err) = rec.observe(&event, &model, amount)
             {
                 notice(&bus, session, format!("session write failed: {err}"));
             }
@@ -270,7 +277,7 @@ impl Run {
                 bus.publish(session, HostEvent::UsageUpdated { usage });
             }
             if let Some(turn) = attempt_usage {
-                add_usage(&mut usage, &turn, price);
+                add_usage(&mut usage, &turn, amount);
                 bus.publish(session, HostEvent::UsageUpdated { usage });
                 if let Some(budget) = &limits.budget
                     && budget.add(turn.input + turn.output)
@@ -426,23 +433,32 @@ fn notice(bus: &Bus, session: SessionId, text: String) {
     );
 }
 
-/// Fold an attempt's usage into the session totals, priced at `price`
-/// when the model has a known price, without changing the context estimate.
-fn add_usage(usage: &mut Usage, turn: &TokenUsage, price: Option<ModelCost>) {
+fn attempt_cost(usage: &TokenUsage, price: Option<ModelCost>) -> Option<f64> {
+    let price = price?;
+    let amount = TokenCost::from_usage(
+        usage,
+        price.input,
+        price.output,
+        price.cache_read,
+        price.cache_write,
+    )
+    .total;
+    (amount.is_finite() && amount >= 0.0).then_some(amount)
+}
+
+/// Fold an attempt's usage and captured cost into the session totals
+/// without changing the context estimate.
+fn add_usage(usage: &mut Usage, turn: &TokenUsage, amount: Option<f64>) {
     let total = &mut usage.total;
     total.input += turn.input;
     total.output += turn.output;
     total.cache_read += turn.cache_read;
     total.cache_write += turn.cache_write;
-    if let Some(rate) = price {
-        usage.cost += TokenCost::from_usage(
-            turn,
-            rate.input,
-            rate.output,
-            rate.cache_read,
-            rate.cache_write,
-        )
-        .total;
+    if let Some(amount) = amount {
+        usage.cost += amount;
+        usage.cost_status = usage.cost_status.merge(CostStatus::Recorded);
+    } else {
+        usage.cost_status = usage.cost_status.merge(CostStatus::Incomplete);
     }
 }
 

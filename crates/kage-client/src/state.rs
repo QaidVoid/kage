@@ -339,6 +339,16 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// Pricing quality of the cumulative cost, defaulting to recorded
+    /// when the agent supplies no pricing metadata.
+    #[must_use]
+    pub fn cost_status(&self) -> kage_acp_wire::CostStatus {
+        self.tokens
+            .as_ref()
+            .map(|tokens| tokens.cost_status)
+            .unwrap_or_default()
+    }
+
     /// The share of the context window in use, in `0.0 ..= 1.0`. A
     /// session with no reported window fills nothing.
     #[must_use]

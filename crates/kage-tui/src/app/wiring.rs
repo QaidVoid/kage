@@ -242,6 +242,7 @@ impl App {
             usage.current_context = node.usage.context_used;
             usage.context_estimated = node.usage.context_estimated;
             usage.total_cost = node.usage.cost;
+            usage.cost_status = node.usage.cost_status;
             if node.usage.context_window > 0 {
                 usage.context_window = node.usage.context_window;
             }
@@ -255,6 +256,7 @@ impl App {
                 usage.cache_read_tokens += total.cache_read;
                 usage.cache_write_tokens += total.cache_write;
                 usage.total_cost += node.usage.cost;
+                usage.cost_status = usage.cost_status.merge(node.usage.cost_status);
             }
         }
         Some(usage)

@@ -1918,8 +1918,7 @@ fn context_ring(
         .count();
     let cost = store
         .active_id()
-        .and_then(|id| store.tree_cost(id))
-        .map(|cost| format!("{} {:.2}", cost.currency, cost.amount))
+        .and_then(|id| crate::cost::tree_label(store, id, 2))
         .unwrap_or_else(|| "unknown".to_owned());
     let model = crate::modes::select_option(session, "model")
         .and_then(|option| {

@@ -2696,6 +2696,34 @@ pub struct UsageMeta {
     pub kage: Option<UsageTokens>,
 }
 
+/// How completely a cumulative monetary amount is priced.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CostStatus {
+    /// Every contributing amount was recorded with known pricing.
+    #[default]
+    Recorded,
+    /// All usage is priced, but some amounts were estimated.
+    Estimated,
+    /// Some usage has no known price, or the pricing status is unrecognized.
+    #[serde(other)]
+    Incomplete,
+}
+
+impl CostStatus {
+    /// Combines statuses, retaining the least complete pricing quality.
+    #[must_use]
+    pub fn merge(self, other: Self) -> Self {
+        self.max(other)
+    }
+
+    /// Whether every contributing amount was recorded with known pricing.
+    #[must_use]
+    pub fn is_recorded(&self) -> bool {
+        *self == Self::Recorded
+    }
+}
+
 /// The session's cumulative token totals, split the way providers bill
 /// them. The four counts do not overlap.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2709,6 +2737,9 @@ pub struct UsageTokens {
     pub cache_read: u64,
     /// Prompt tokens written to the provider's cache.
     pub cache_write: u64,
+    /// Pricing quality of the session's cumulative monetary amount.
+    #[serde(default, skip_serializing_if = "CostStatus::is_recorded")]
+    pub cost_status: CostStatus,
 }
 
 /// A monetary amount.
@@ -2799,6 +2830,9 @@ pub struct SubagentUsage {
     /// Spend in USD, when the model is priced.
     #[serde(default)]
     pub cost: f64,
+    /// Pricing quality of the child's cumulative USD amount.
+    #[serde(default, skip_serializing_if = "CostStatus::is_recorded")]
+    pub cost_status: CostStatus,
     /// Time spent running, in milliseconds, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_ms: Option<u64>,
@@ -4218,6 +4252,7 @@ mod tests {
                         output: 2,
                         cache_read: 7,
                         cache_write: 1,
+                        cost_status: CostStatus::default(),
                     }),
                 }),
             }),

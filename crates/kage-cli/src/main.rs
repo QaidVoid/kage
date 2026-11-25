@@ -1469,6 +1469,7 @@ fn run_print_mode(cli: Cli) -> ExitCode {
         &model,
         tools,
         cx,
+        None,
         prompt,
         writer,
         plugin_runtime,

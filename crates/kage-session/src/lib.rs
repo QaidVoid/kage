@@ -14,6 +14,7 @@
 
 pub mod blobs;
 pub mod catalog;
+pub mod cost;
 pub mod entry;
 pub mod error;
 pub mod external_replay;
@@ -29,6 +30,7 @@ pub mod writer;
 
 pub use blobs::BlobStore;
 pub use catalog::CATALOG_FILE;
+pub use cost::UsageCost;
 pub use entry::{
     BranchEntry, Compaction, Custom, EntryId, ExternalAcpSession, FORMAT_VERSION, Header, Label,
     MessageEntry, ModelChange, RejectedUsage, SessionBackend, SessionEntry, SessionId,
@@ -38,7 +40,9 @@ pub use error::SessionError;
 pub use fork::{Snapshot, fork, fork_as, resolve_entry_prefix, snapshot};
 pub use list::{SessionCache, SessionSummary, is_agent_session, list};
 pub use reader::SessionReader;
-pub use resume::{ReplayResult, ReplayUsage, find_by_prefix, find_last, replay, replay_tree};
+pub use resume::{
+    ReplayAccounting, ReplayResult, ReplayUsage, find_by_prefix, find_last, replay, replay_tree,
+};
 pub use search::{SearchHit, search};
 pub use tree::{SessionTree, TreeNode, TreeWalk};
 pub use writer::{SessionWriter, delete_locked, delete_with_agents, is_locked, move_locked};

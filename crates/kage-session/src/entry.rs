@@ -671,7 +671,7 @@ impl TryFrom<UncheckedCustom> for Custom {
     fn try_from(value: UncheckedCustom) -> Result<Self, Self::Error> {
         if matches!(
             value.kind.as_str(),
-            EXTERNAL_ACP_PRESENTATION_KIND | REJECTED_USAGE_KIND
+            EXTERNAL_ACP_PRESENTATION_KIND | REJECTED_USAGE_KIND | crate::cost::USAGE_COST_KIND
         ) && value.data.duplicate_field
         {
             return Err(serde::de::Error::custom(
@@ -686,6 +686,7 @@ impl TryFrom<UncheckedCustom> for Custom {
         };
         ExternalAcpPresentation::from_custom(&custom)?;
         RejectedUsage::from_custom(&custom)?;
+        crate::UsageCost::from_custom(&custom)?;
         Ok(custom)
     }
 }
@@ -701,6 +702,7 @@ impl Serialize for Custom {
         }
         ExternalAcpPresentation::from_custom(self).map_err(serde::ser::Error::custom)?;
         RejectedUsage::from_custom(self).map_err(serde::ser::Error::custom)?;
+        crate::UsageCost::from_custom(self).map_err(serde::ser::Error::custom)?;
         CustomRef {
             id: self.id,
             ts: self.ts,

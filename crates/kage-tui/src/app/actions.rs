@@ -1051,11 +1051,10 @@ fn usage_body(usage: &crate::usage::SessionUsage) -> String {
             usage.model.as_str()
         }
     ));
-    let cost = if usage.total_cost > 0.0 {
-        format!("  (${:.2})", usage.total_cost)
-    } else {
-        String::new()
-    };
+    let cost = format!(
+        "  ({})",
+        crate::usage::cost_label(usage.total_cost, usage.cost_status)
+    );
     lines.push(format!(
         "    input {}  output {}  cache read {}  cache write {}  total {}{cost}",
         compact_tokens(usage.input_tokens),

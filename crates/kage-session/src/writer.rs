@@ -166,32 +166,47 @@ impl SessionWriter {
     /// message's large media go to the blob store first and the line
     /// names them (see [`crate::blobs`]).
     pub fn append(&mut self, entry: &SessionEntry) -> Result<(), SessionError> {
+        self.append_many(std::slice::from_ref(entry))
+    }
+
+    /// Append entries in order with one flush and fsync for the batch.
+    ///
+    /// Large message media are externalized as with [`Self::append`]. The
+    /// writer retains its exclusive lock throughout. A failed append can
+    /// leave a partial batch; annotations must precede their usage targets
+    /// so an interrupted batch cannot create a standalone charge.
+    pub fn append_many(&mut self, entries: &[SessionEntry]) -> Result<(), SessionError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
         self.inner
             .seek(std::io::SeekFrom::End(0))
             .map_err(|err| self.io_err(err))?;
-        let stored = match entry {
-            SessionEntry::Message(message) => BlobStore::beside(&self.path)
-                .externalize(&message.message)
-                .map_err(|err| self.io_err(err))?
-                .map(|moved| {
-                    SessionEntry::Message(MessageEntry {
-                        message: Arc::new(moved),
-                        ..message.clone()
-                    })
-                }),
-            _ => None,
-        };
-        let entry = stored.as_ref().unwrap_or(entry);
-        let line = serde_json::to_vec(entry).map_err(|err| SessionError::Encode {
-            path: self.path.clone(),
-            source: err,
-        })?;
-        self.inner
-            .write_all(&line)
-            .map_err(|err| self.io_err(err))?;
-        self.inner
-            .write_all(b"\n")
-            .map_err(|err| self.io_err(err))?;
+        for entry in entries {
+            let stored = match entry {
+                SessionEntry::Message(message) => BlobStore::beside(&self.path)
+                    .externalize(&message.message)
+                    .map_err(|err| self.io_err(err))?
+                    .map(|moved| {
+                        SessionEntry::Message(MessageEntry {
+                            message: Arc::new(moved),
+                            ..message.clone()
+                        })
+                    }),
+                _ => None,
+            };
+            let entry = stored.as_ref().unwrap_or(entry);
+            let line = serde_json::to_vec(entry).map_err(|err| SessionError::Encode {
+                path: self.path.clone(),
+                source: err,
+            })?;
+            self.inner
+                .write_all(&line)
+                .map_err(|err| self.io_err(err))?;
+            self.inner
+                .write_all(b"\n")
+                .map_err(|err| self.io_err(err))?;
+        }
         self.inner.flush().map_err(|err| self.io_err(err))?;
         self.inner
             .get_ref()

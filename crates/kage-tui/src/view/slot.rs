@@ -64,7 +64,12 @@ impl<'a> Sources<'a> {
         width: u16,
     ) -> Self {
         let usage = usage.filter(|u| {
-            !u.model.is_empty() || u.total_tokens() > 0 || u.current_context > 0 || u.working
+            !u.model.is_empty()
+                || u.total_tokens() > 0
+                || u.current_context > 0
+                || u.working
+                || u.total_cost > 0.0
+                || !u.cost_status.is_recorded()
         });
         Self {
             status,
@@ -888,12 +893,10 @@ fn push_usage(name: &str, u: &SessionUsage, styles: &Styles, out: &mut Vec<Span<
                     ));
                 }
             }
-            if u.total_cost > 0.0 {
+            if u.total_cost > 0.0 || !u.cost_status.is_recorded() {
                 let lead = if shown { " " } else { "" };
-                out.push(Span::styled(
-                    format!("{lead}${:.2}", u.total_cost),
-                    styles.text,
-                ));
+                let cost = crate::usage::cost_label(u.total_cost, u.cost_status);
+                out.push(Span::styled(format!("{lead}{cost}"), styles.text));
             }
         }
         "thinking" if u.thinking_level.is_some_and(|l| !l.is_off()) => {
@@ -1037,6 +1040,27 @@ mod tests {
         assert_eq!(painted("plan", &off, &input), "");
         let planning = SessionUsage { plan: true, ..off };
         assert_eq!(painted("plan", &planning, &input), "plan");
+    }
+
+    #[test]
+    fn footer_cost_labels_distinguish_estimates_partial_and_unknown() {
+        use kage_core::CostStatus;
+        let input = InputState::new();
+        for (total_cost, cost_status, expected) in [
+            (1.25, CostStatus::Recorded, "$1.25"),
+            (1.25, CostStatus::Estimated, "~$1.25"),
+            (1.25, CostStatus::Incomplete, "$1.25 (partial)"),
+            (0.0, CostStatus::Incomplete, "cost unknown"),
+            (0.0, CostStatus::Estimated, "~$0.00"),
+            (0.0, CostStatus::Recorded, ""),
+        ] {
+            let usage = SessionUsage {
+                total_cost,
+                cost_status,
+                ..SessionUsage::default()
+            };
+            assert_eq!(painted("tokens", &usage, &input), expected);
+        }
     }
 
     #[test]

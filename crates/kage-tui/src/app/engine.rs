@@ -285,6 +285,7 @@ impl App {
                     usage.context_estimated = totals.context_estimated;
                     usage.context_window = totals.context_window;
                     usage.total_cost = totals.cost;
+                    usage.cost_status = totals.cost_status;
                 }
                 if !totals.context_estimated
                     && let Some(before) = self.pending_compaction_before.take()

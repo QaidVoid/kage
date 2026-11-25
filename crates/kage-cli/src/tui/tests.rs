@@ -71,6 +71,7 @@ fn render_session_markdown_covers_roles_and_blocks() {
         model: "anthropic:claude".into(),
         tool_durations: std::collections::HashMap::new(),
         usage_total: kage_session::ReplayUsage::default(),
+        accounting: kage_session::ReplayAccounting::default(),
         thinking_level: None,
         title: None,
         swarm_mode: None,

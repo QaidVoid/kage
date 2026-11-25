@@ -142,8 +142,14 @@ agent belongs to the call that started it. Loading a session rebuilds
 `subagent_update` records for the agents its history started, at
 every depth, from the results the engine recorded.
 
+Standard `usage_update` messages carry cumulative token totals under
+`_meta.kage`. Its optional `costStatus` is `recorded`, `estimated`, or
+`incomplete`; omission means `recorded`. Estimated totals use current prices
+for legacy usage, while incomplete totals omit some unpriced usage. A known
+free amount can be present as zero. Do not display missing pricing as free.
+
 A `subagent_update` may also carry `model`, the child's
 `provider/model`, and `usage`: `{ input, output, cacheRead,
-cacheWrite, cost, runMs? }`, the child's token totals, its cost in
+cacheWrite, cost, costStatus?, runMs? }`, the child's token totals, its cost in
 USD and how long it has run. The engine sends them as the child
 reports usage and on the update that ends it.

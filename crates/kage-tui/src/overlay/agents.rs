@@ -13,7 +13,7 @@
 
 use std::collections::HashSet;
 
-use kage_core::SessionId;
+use kage_core::{CostStatus, SessionId};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -86,8 +86,10 @@ pub struct AgentsRow {
     pub elapsed_ms: Option<u64>,
     /// Input and output tokens the session used.
     pub tokens: u64,
-    /// Dollars the session cost. `0.0` without pricing.
+    /// Known dollars the session cost.
     pub cost: f64,
+    /// Whether the cost is recorded, estimated, or missing some usage.
+    pub cost_status: CostStatus,
 }
 
 /// The agents overlay.
@@ -268,8 +270,11 @@ impl AgentsOverlay {
             parts.push(tokens_label(tokens));
         }
         let cost: f64 = self.rows.iter().map(|r| r.cost).sum();
-        if cost > 0.0 {
-            parts.push(format!("${cost:.2}"));
+        let status = self.rows.iter().fold(CostStatus::Recorded, |status, row| {
+            status.merge(row.cost_status)
+        });
+        if cost > 0.0 || !status.is_recorded() {
+            parts.push(crate::usage::cost_label(cost, status));
         }
         if parts.is_empty() {
             return String::new();
@@ -629,6 +634,7 @@ mod tests {
             elapsed_ms: Some(41_000),
             tokens: 22_000,
             cost: 0.05,
+            cost_status: CostStatus::Recorded,
         }
     }
 
@@ -662,6 +668,20 @@ mod tests {
                     .to_owned()
             })
             .collect()
+    }
+
+    #[test]
+    fn summary_merges_cost_quality_even_for_folded_children() {
+        let (mut overlay, ids) = tree();
+        overlay.rows[0].cost_status = CostStatus::Estimated;
+        assert!(overlay.summary().contains("~$0.20"));
+        overlay.rows[2].cost_status = CostStatus::Incomplete;
+        overlay.folded.insert(ids[0]);
+        assert!(overlay.summary().contains("$0.20 (partial)"));
+        for row in &mut overlay.rows {
+            row.cost = 0.0;
+        }
+        assert!(overlay.summary().contains("cost unknown"));
     }
 
     #[test]

@@ -121,6 +121,8 @@ impl super::CliAcpAgent {
                 .ok_or_else(|| RpcError::internal("the session closed while it was opening"))?;
             return self.attach_live(id, client_id, &path, &settings, replay_file, ctx);
         };
+        let providers = self.host.providers();
+        let initial_usage = crate::engine::usage_from_replay(&replay, &providers.registry);
         if replay_file && let Some(ctx) = ctx {
             // Nothing runs this session, so a call the file never closed
             // ended with the engine that made it.
@@ -142,7 +144,6 @@ impl super::CliAcpAgent {
                 }));
             }
         }
-        let providers = self.host.providers();
         let model = if providers.registry.resolve(&replay.model).is_ok() {
             replay.model
         } else {
@@ -161,6 +162,7 @@ impl super::CliAcpAgent {
             self.hosted_plugins(id, meta)?,
             &SessionSettings::of(meta, self.kage_client.load(Ordering::SeqCst))?,
         )?;
+        spec.initial_usage = Some(initial_usage);
         spec.cx.history = replay.history;
         spec.cx.budget = TokenBudget {
             used_input: replay.usage_total.input,

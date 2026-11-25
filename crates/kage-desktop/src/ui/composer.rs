@@ -1465,8 +1465,7 @@ fn hint_line(
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let cost = store
                         .active_id()
-                        .and_then(|id| store.tree_cost(id))
-                        .map(|cost| format!("{} {:.4}", cost.currency, cost.amount))
+                        .and_then(|id| crate::cost::tree_label(store, id, 4))
                         .unwrap_or_default();
                     if !cost.is_empty() {
                         word(ui, &cost);

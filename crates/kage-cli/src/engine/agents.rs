@@ -1315,6 +1315,7 @@ fn child_spec(
         id,
         model,
         cx,
+        initial_usage: None,
         recorder,
         tools,
         plugins: None,
@@ -1426,6 +1427,7 @@ fn resumed_spec(
     writer: kage_session::SessionWriter,
     registry: &ProviderRegistry,
 ) -> (SessionSpec, Vec<String>, Option<String>) {
+    let initial_usage = super::usage_from_replay(&replay, registry);
     let (model, note) = if registry.resolve(&replay.model).is_ok() {
         (replay.model.clone(), None)
     } else {
@@ -1454,6 +1456,7 @@ fn resumed_spec(
         Some(Recorder::new(writer, None)),
         setup,
     );
+    spec.initial_usage = Some(initial_usage);
     spec.cx.history = replay.history;
     spec.cx.budget = TokenBudget {
         used_input: replay.usage_total.input,

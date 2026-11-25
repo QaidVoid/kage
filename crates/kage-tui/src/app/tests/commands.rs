@@ -155,7 +155,7 @@ fn usage_command_renders_totals_cache_and_context_bar() {
 }
 
 #[test]
-fn usage_command_without_window_or_cost() {
+fn usage_command_without_window_shows_recorded_zero_cost() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
     let mut app = app_with_defaults(buffer.clone(), tx);
@@ -167,7 +167,7 @@ fn usage_command_without_window_or_cost() {
     };
     assert!(rendered.contains("input 0"), "{rendered}");
     assert!(rendered.contains("(unknown window)"), "{rendered}");
-    assert!(!rendered.contains('$'), "{rendered}");
+    assert!(rendered.contains("($0.00)"), "{rendered}");
 }
 
 #[test]
@@ -1061,4 +1061,34 @@ fn rewind_command_requests_the_prompt_list() {
         "expected Done(None), got {result:?}"
     );
     assert_eq!(rx.try_recv(), Ok(RunRequest::ListPrompts));
+}
+
+#[test]
+fn usage_details_qualify_cost_and_show_known_free_usage() {
+    use kage_core::CostStatus;
+    for (total_cost, cost_status, expected) in [
+        (1.25, CostStatus::Estimated, "(~$1.25)"),
+        (1.25, CostStatus::Incomplete, "($1.25 (partial))"),
+        (0.0, CostStatus::Incomplete, "(cost unknown)"),
+        (0.0, CostStatus::Recorded, "($0.00)"),
+    ] {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = app_with_defaults(buffer.clone(), tx);
+        let usage = crate::usage::shared_session_usage();
+        {
+            let mut usage = lock(&usage);
+            usage.total_cost = total_cost;
+            usage.cost_status = cost_status;
+        }
+        app.set_session_usage(usage);
+        app.push_usage();
+        let buffer = lock(&buffer);
+        let Some(crate::buffer::Block::Custom { text, .. }) =
+            buffer.blocks().last().map(Arc::as_ref)
+        else {
+            panic!("expected usage details");
+        };
+        assert!(text.contains(expected), "{text}");
+    }
 }

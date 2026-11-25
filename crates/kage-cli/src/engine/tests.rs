@@ -18,6 +18,10 @@ use super::*;
 
 const WAIT: Duration = Duration::from_secs(20);
 
+fn assert_cost(actual: f64, expected: f64) {
+    assert!((actual - expected).abs() < 1e-12, "{actual} != {expected}");
+}
+
 fn text_turn(text: &str) -> Vec<Result<ProviderEvent, ProviderError>> {
     vec![
         Ok(ProviderEvent::MessageStart),
@@ -152,6 +156,7 @@ impl Harness {
             model: "mock/m".into(),
             cx: AgentContext::new("m", "").with_workdir(std::env::temp_dir()),
             recorder: None,
+            initial_usage: None,
             tools: self.tools.clone(),
             plugins: None,
             gate: PermissionGate::new(PermissionsConfig::default()),
@@ -859,9 +864,12 @@ fn undo_branches_the_session_in_place_and_returns_its_prompt() {
     until_runs_end(&h.events, 1);
     let tree = kage_session::SessionTree::read(&path).unwrap();
     assert_eq!(
-        tree.walk().len(),
+        tree.walk()
+            .iter()
+            .filter(|entry| matches!(entry.entry, kage_session::SessionEntry::Message(_)))
+            .count(),
         6,
-        "the abandoned branch stays in the file"
+        "the abandoned branch's messages stay in the file"
     );
     assert_eq!(
         kage_session::replay(&path).unwrap().history.len(),
@@ -1199,9 +1207,12 @@ fn rewind_keeps_the_picked_prompt_and_drops_the_rest() {
     );
     let tree = kage_session::SessionTree::read(&path).unwrap();
     assert_eq!(
-        tree.walk().len(),
+        tree.walk()
+            .iter()
+            .filter(|entry| matches!(entry.entry, kage_session::SessionEntry::Message(_)))
+            .count(),
         6,
-        "the abandoned branch stays in the file"
+        "the abandoned branch's messages stay in the file"
     );
     let undone = seen
         .iter()
@@ -2006,6 +2017,7 @@ fn first_exchange_records_a_title() {
         id,
         model: "mock/m".into(),
         cx: AgentContext::new("m", "").with_workdir(std::env::temp_dir()),
+        initial_usage: None,
         recorder: Some(recorder),
         tools: h.tools.clone(),
         plugins: None,
@@ -2177,6 +2189,7 @@ fn plugin_turn_end_entries_land_in_the_session_file() {
         id,
         model: "mock/m".into(),
         cx: AgentContext::new("m", "").with_workdir(std::env::temp_dir()),
+        initial_usage: None,
         recorder: Some(Recorder::new(
             writer,
             Some(Arc::clone(&runtime) as Arc<dyn SessionPlugins>),
@@ -2332,8 +2345,8 @@ fn agent_call_returns_the_child_reply_and_records_the_child() {
     assert!(
         output.text.starts_with(&format!(
             "<agent name=\"general\" session=\"{child}\" state=\"completed\" model=\"mock/m\" \
-             tools=\"0\" in=\"10\" out=\"2\" cache_read=\"0\" cache_write=\"0\" cost=\"0.0000\" \
-             ctx=\"12\" win=\"200000\" run_ms=\""
+             tools=\"0\" in=\"10\" out=\"2\" cache_read=\"0\" cache_write=\"0\" cost=\"0\" \
+             ctx=\"12\" win=\"200000\" cost_status=\"incomplete\" run_ms=\""
         )),
         "{}",
         output.text
@@ -3867,8 +3880,8 @@ fn a_swarm_and_an_agent_call_work_in_sequence() {
     assert!(
         agent.text.starts_with(&format!(
             "<agent name=\"general\" session=\"{}\" state=\"completed\" model=\"mock/m\" \
-             tools=\"0\" in=\"10\" out=\"2\" cache_read=\"0\" cache_write=\"0\" cost=\"0.0000\" \
-             ctx=\"12\" win=\"200000\" run_ms=\"",
+             tools=\"0\" in=\"10\" out=\"2\" cache_read=\"0\" cache_write=\"0\" cost=\"0\" \
+             ctx=\"12\" win=\"200000\" cost_status=\"incomplete\" run_ms=\"",
             spawned(&events).last().unwrap().0
         )),
         "{}",
@@ -5027,11 +5040,11 @@ fn thinking_fits_the_model_and_images_skip_text_only_models() {
 }
 
 #[test]
-fn run_cost_comes_from_the_declared_model_price() {
+fn run_cost_and_snapshot_use_the_actual_scoped_model_price() {
     let declared = Declared {
         mock: MockProvider::replaying(text_turn("ok")),
         model: kage_provider::ProviderModel {
-            id: "m".into(),
+            id: "scoped/model".into(),
             cost: Some(kage_core::ModelCost {
                 input: 100.0,
                 output: 1000.0,
@@ -5042,15 +5055,321 @@ fn run_cost_comes_from_the_declared_model_price() {
         },
     };
     let h = harness_on(ProviderRegistry::new().with(Arc::new(declared)));
+    let dir = tempfile::tempdir().unwrap();
     let id = SessionId::new();
-    h.open(id, None);
+    let (recorder, path) = recorder_in(dir.path(), id);
+    let mut spec = h.spec(id);
+    spec.model = "mock/scoped/model".into();
+    spec.cx.model = "scoped/model".into();
+    spec.recorder = Some(recorder);
+    h.engine.open(spec);
     prompt(&h.engine, id, "hi", Delivery::Steer);
     let events = until_runs_end(&h.events, 1);
-    let usage = events.iter().rev().find_map(|e| match &e.event {
-        Event::Host(HostEvent::UsageUpdated { usage }) => Some(*usage),
-        _ => None,
+    h.engine.shutdown();
+    let usage = events
+        .iter()
+        .rev()
+        .find_map(|e| match &e.event {
+            Event::Host(HostEvent::UsageUpdated { usage }) => Some(*usage),
+            _ => None,
+        })
+        .unwrap();
+    assert!((usage.cost - 0.003).abs() < 1e-12);
+    assert_eq!(usage.cost_status, kage_core::CostStatus::Recorded);
+    let entries = kage_session::SessionReader::iter(&path)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let snapshot = entries
+        .iter()
+        .find_map(|entry| match entry {
+            kage_session::SessionEntry::Custom(custom) => {
+                kage_session::UsageCost::from_custom(custom).unwrap()
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(snapshot.model, "mock/scoped/model");
+    assert_eq!(snapshot.amount, Some(usage.cost));
+    let replay = kage_session::replay(&path).unwrap();
+    assert_cost(replay.accounting.cost, usage.cost);
+    let repriced = ProviderRegistry::new().with(Arc::new(Declared {
+        mock: MockProvider::replaying(text_turn("unused")),
+        model: kage_provider::ProviderModel {
+            id: "scoped/model".into(),
+            cost: Some(kage_core::ModelCost {
+                input: 9999.0,
+                output: 9999.0,
+                cache_read: None,
+                cache_write: None,
+            }),
+            ..kage_provider::ProviderModel::default()
+        },
+    }));
+    assert_cost(
+        super::usage_from_replay(&replay, &repriced).cost,
+        usage.cost,
+    );
+    assert_cost(
+        super::usage_from_replay(&replay, &ProviderRegistry::new()).cost,
+        usage.cost,
+    );
+}
+
+#[test]
+fn loading_cloning_rewinding_and_forking_restore_selected_costs() {
+    let h = harness_on(priced_mock(MockProvider::replaying(text_turn("answer"))));
+    let dir = tempfile::tempdir().unwrap();
+    let id = SessionId::new();
+    let (recorder, path) = recorder_in(dir.path(), id);
+    h.open(id, Some(recorder));
+    for text in ["first", "second", "third"] {
+        prompt(&h.engine, id, text, Delivery::Queue);
+        until_runs_end(&h.events, 1);
+    }
+    let switch = |from, kind| {
+        h.engine.send(Command::to(from, kind));
+        let events = wait_for(&h.events, is_mcp_servers);
+        let changed = events
+            .iter()
+            .find_map(|event| match &event.event {
+                Event::Host(HostEvent::SessionChanged { .. }) => Some(event.session),
+                _ => None,
+            })
+            .unwrap();
+        let usage = events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.event {
+                Event::Host(HostEvent::UsageUpdated { usage }) => Some(*usage),
+                _ => None,
+            })
+            .unwrap();
+        (changed, usage)
+    };
+    let (fresh, empty) = switch(id, CommandKind::NewSession);
+    assert_cost(empty.cost, 0.0);
+    let (loaded, restored) = switch(fresh, CommandKind::LoadSession { path: path.clone() });
+    assert_eq!(loaded, id);
+    assert_cost(restored.cost, 0.009);
+    assert_eq!(restored.cost_status, kage_core::CostStatus::Recorded);
+    let (cloned, copied) = switch(id, CommandKind::Clone);
+    assert_cost(copied.cost, restored.cost);
+    assert_eq!(copied.cost_status, restored.cost_status);
+    h.engine.send(Command::to(cloned, CommandKind::Undo));
+    let events = wait_for(&h.events, |event| {
+        matches!(event.event, Event::Host(HostEvent::Undone { .. }))
     });
-    assert!((usage.unwrap().cost - 0.003).abs() < 1e-12);
+    let rewound = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.event {
+            Event::Host(HostEvent::UsageUpdated { usage }) => Some(*usage),
+            _ => None,
+        })
+        .unwrap();
+    assert_cost(rewound.cost, 0.006);
+    assert_eq!(rewound.total.input, 20);
+    let (_, forked) = switch(
+        cloned,
+        CommandKind::Fork {
+            at: None,
+            switch: true,
+        },
+    );
+    assert_cost(forked.cost, rewound.cost);
+    assert_eq!(forked.total, rewound.total);
+    assert_eq!(forked.cost_status, kage_core::CostStatus::Recorded);
+    assert_cost(kage_session::replay(&path).unwrap().accounting.cost, 0.009);
+}
+
+#[test]
+fn restored_recorded_cost_adds_only_the_new_live_attempt_price() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = SessionId::new();
+    let (recorder, path) = recorder_in(dir.path(), id);
+    let first = harness_on(priced_mock(MockProvider::replaying(text_turn("old"))));
+    first.open(id, Some(recorder));
+    prompt(&first.engine, id, "first", Delivery::Queue);
+    until_runs_end(&first.events, 1);
+    first.engine.shutdown();
+
+    let registry = ProviderRegistry::new().with(Arc::new(Declared {
+        mock: MockProvider::replaying(text_turn("new")),
+        model: kage_provider::ProviderModel {
+            id: "m".into(),
+            cost: Some(kage_core::ModelCost {
+                input: 200.0,
+                output: 2000.0,
+                cache_read: None,
+                cache_write: None,
+            }),
+            ..kage_provider::ProviderModel::default()
+        },
+    }));
+    let replay = kage_session::replay(&path).unwrap();
+    let restored = super::usage_from_replay(&replay, &registry);
+    assert!((restored.cost - 0.003).abs() < 1e-12);
+    assert_eq!(restored.cost_status, kage_core::CostStatus::Recorded);
+    let second = harness_on(registry);
+    let mut spec = second.spec(id);
+    spec.cx.history = replay.history;
+    spec.cx.budget.current_context = restored.context_used;
+    spec.initial_usage = Some(restored);
+    spec.recorder = Some(Recorder::new(SessionWriter::open(&path).unwrap(), None));
+    second.engine.open(spec);
+    prompt(&second.engine, id, "second", Delivery::Queue);
+    let events = until_runs_end(&second.events, 1);
+    second.engine.shutdown();
+    let usage = host_events(&events)
+        .into_iter()
+        .rev()
+        .find_map(|event| match event {
+            HostEvent::UsageUpdated { usage } => Some(*usage),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(usage.total.input, 20);
+    assert_eq!(usage.total.output, 4);
+    assert_cost(usage.cost, restored.cost + 0.006);
+    assert_eq!(usage.cost_status, kage_core::CostStatus::Recorded);
+    let replay = kage_session::replay(&path).unwrap();
+    assert_cost(replay.accounting.cost, usage.cost);
+    assert_eq!(replay.accounting.cost_status, usage.cost_status);
+    assert_cost(
+        super::usage_from_replay(&replay, &ProviderRegistry::new()).cost,
+        usage.cost,
+    );
+}
+
+#[test]
+fn live_pricing_preserves_restored_cost_confidence() {
+    for status in [
+        kage_core::CostStatus::Estimated,
+        kage_core::CostStatus::Incomplete,
+    ] {
+        let h = harness_on(priced_mock(MockProvider::replaying(text_turn("ok"))));
+        let id = SessionId::new();
+        let mut spec = h.spec(id);
+        spec.initial_usage = Some(kage_core::protocol::Usage {
+            cost: 1.25,
+            cost_status: status,
+            ..kage_core::protocol::Usage::default()
+        });
+        h.engine.open(spec);
+        prompt(&h.engine, id, "hi", Delivery::Queue);
+        let events = until_runs_end(&h.events, 1);
+        h.engine.shutdown();
+        let usage = host_events(&events)
+            .into_iter()
+            .rev()
+            .find_map(|event| match event {
+                HostEvent::UsageUpdated { usage } => Some(*usage),
+                _ => None,
+            })
+            .unwrap();
+        assert_cost(usage.cost, 1.25 + 0.003);
+        assert_eq!(usage.cost_status, status);
+    }
+}
+
+#[test]
+fn live_free_and_unknown_prices_remain_distinct_after_replay() {
+    for price in [
+        None,
+        Some(kage_core::ModelCost {
+            input: 0.0,
+            output: 0.0,
+            cache_read: None,
+            cache_write: None,
+        }),
+    ] {
+        let registry = ProviderRegistry::new().with(Arc::new(Declared {
+            mock: MockProvider::replaying(text_turn("ok")),
+            model: kage_provider::ProviderModel {
+                id: "m".into(),
+                cost: price,
+                ..kage_provider::ProviderModel::default()
+            },
+        }));
+        let h = harness_on(registry);
+        let dir = tempfile::tempdir().unwrap();
+        let id = SessionId::new();
+        let (recorder, path) = recorder_in(dir.path(), id);
+        h.open(id, Some(recorder));
+        prompt(&h.engine, id, "hi", Delivery::Queue);
+        let events = until_runs_end(&h.events, 1);
+        h.engine.shutdown();
+        let usage = host_events(&events)
+            .into_iter()
+            .rev()
+            .find_map(|event| match event {
+                HostEvent::UsageUpdated { usage } => Some(*usage),
+                _ => None,
+            })
+            .unwrap();
+        let status = if price.is_some() {
+            kage_core::CostStatus::Recorded
+        } else {
+            kage_core::CostStatus::Incomplete
+        };
+        assert_cost(usage.cost, 0.0);
+        assert_eq!(usage.cost_status, status);
+        let replay = kage_session::replay(&path).unwrap();
+        assert_eq!(replay.accounting.cost_status, status);
+        assert!(replay.accounting.legacy_usage.is_empty());
+        let restored = super::usage_from_replay(
+            &replay,
+            &priced_mock(MockProvider::replaying(text_turn("unused"))),
+        );
+        assert_cost(restored.cost, 0.0);
+        assert_eq!(restored.cost_status, status);
+    }
+}
+
+#[test]
+fn invalid_live_cost_is_saved_as_explicitly_unknown() {
+    for rate in [f64::NAN, f64::INFINITY, f64::MAX, -1.0] {
+        let registry = ProviderRegistry::new().with(Arc::new(Declared {
+            mock: MockProvider::replaying(text_turn("ok")),
+            model: kage_provider::ProviderModel {
+                id: "m".into(),
+                cost: Some(kage_core::ModelCost {
+                    input: rate,
+                    output: rate,
+                    cache_read: None,
+                    cache_write: None,
+                }),
+                ..kage_provider::ProviderModel::default()
+            },
+        }));
+        let h = harness_on(registry);
+        let dir = tempfile::tempdir().unwrap();
+        let id = SessionId::new();
+        let (recorder, path) = recorder_in(dir.path(), id);
+        h.open(id, Some(recorder));
+        prompt(&h.engine, id, "hi", Delivery::Queue);
+        let events = until_runs_end(&h.events, 1);
+        h.engine.shutdown();
+        assert_eq!(outcomes(&events), [RunOutcome::Completed]);
+        let usage = host_events(&events)
+            .into_iter()
+            .rev()
+            .find_map(|event| match event {
+                HostEvent::UsageUpdated { usage } => Some(*usage),
+                _ => None,
+            })
+            .unwrap();
+        assert_cost(usage.cost, 0.0);
+        assert_eq!(usage.cost_status, kage_core::CostStatus::Incomplete);
+        let replay = kage_session::replay(&path).unwrap();
+        assert_cost(replay.accounting.cost, 0.0);
+        assert_eq!(
+            replay.accounting.cost_status,
+            kage_core::CostStatus::Incomplete
+        );
+        assert!(replay.accounting.legacy_usage.is_empty());
+    }
 }
 
 fn reasoning_only_turn(usage: TokenUsage, stop_reason: StopReason) -> Script {
@@ -5080,6 +5399,10 @@ fn priced_mock(mock: MockProvider) -> ProviderRegistry {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one run verifies live pricing, durable costs, and replay together"
+)]
 fn rejected_usage_is_priced_recorded_and_replayed_before_a_valid_response() {
     let rejected = TokenUsage {
         input: 7,
@@ -5129,6 +5452,7 @@ fn rejected_usage_is_priced_recorded_and_replayed_before_a_valid_response() {
     assert_eq!(usage[1].context_used, 12);
     assert!(!usage[1].context_estimated);
     assert!((usage[1].cost - 0.00941).abs() < 1e-12);
+    assert_eq!(usage[1].cost_status, kage_core::CostStatus::Recorded);
     assert_eq!(
         events
             .iter()
@@ -5147,6 +5471,16 @@ fn rejected_usage_is_priced_recorded_and_replayed_before_a_valid_response() {
     assert_eq!(replay.usage_total.cache_read, 11);
     assert_eq!(replay.usage_total.cache_write, 13);
     assert_eq!(replay.usage_total.last_context, 12);
+    assert_cost(replay.accounting.cost, usage[1].cost);
+    assert_eq!(
+        replay.accounting.cost_status,
+        kage_core::CostStatus::Recorded
+    );
+    assert!(replay.accounting.legacy_usage.is_empty());
+    assert_cost(
+        super::usage_from_replay(&replay, &ProviderRegistry::new()).cost,
+        usage[1].cost,
+    );
     let entries: Vec<_> = kage_session::SessionReader::iter(&path)
         .unwrap()
         .collect::<Result<_, _>>()
@@ -5256,11 +5590,21 @@ fn final_rejected_usage_is_durable_without_an_assistant_message() {
             final_usage.total.cache_write
         );
         assert_eq!(replay.usage_total.last_context, 0);
+        assert_cost(replay.accounting.cost, final_usage.cost);
+        assert_eq!(
+            replay.accounting.cost_status,
+            kage_core::CostStatus::Recorded
+        );
+        assert!(replay.accounting.legacy_usage.is_empty());
+        assert_cost(
+            super::usage_from_replay(&replay, &ProviderRegistry::new()).cost,
+            final_usage.cost,
+        );
         let entries: Vec<_> = kage_session::SessionReader::iter(&path)
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(entries.len(), 2 + usize::from(attempts));
+        assert_eq!(entries.len(), 2 + 2 * usize::from(attempts));
         assert!(matches!(
             entries.last(),
             Some(kage_session::SessionEntry::Custom(_))

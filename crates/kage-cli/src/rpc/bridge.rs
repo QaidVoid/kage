@@ -112,7 +112,7 @@ pub(super) struct Bridge {
     /// The cost of a client session's agents already pruned from the
     /// tree, which a client without the subagents capability sees in
     /// the session's own cost.
-    pub(super) pruned_cost: HashMap<SessionId, f64>,
+    pub(super) pruned_cost: HashMap<SessionId, (f64, kage_core::CostStatus)>,
     /// Compactions this connection announced but has not closed: the
     /// counts and summary the loop reported, and the fill before it,
     /// so `_kage/compaction` can name the savings once the fill is
@@ -441,8 +441,13 @@ impl Bridge {
                 self.fills.insert(session, usage.context_used);
                 let mut usage = *usage;
                 if !self.subagents.load(Ordering::SeqCst) {
-                    usage.cost += self.tree.usage_under(session).cost
-                        + self.pruned_cost.get(&session).copied().unwrap_or_default();
+                    let children = self.tree.usage_under(session);
+                    let pruned = self.pruned_cost.get(&session).copied().unwrap_or_default();
+                    usage.cost += children.cost + pruned.0;
+                    usage.cost_status = usage
+                        .cost_status
+                        .merge(children.cost_status)
+                        .merge(pruned.1);
                 }
                 if let Some(update) = usage_update(&usage) {
                     self.send(session, &client_id, update);
@@ -1155,9 +1160,14 @@ impl Bridge {
             .map(|(_, node)| node.session)
             .collect();
         for root in roots {
-            let cost = self.tree.get(root).map_or(0.0, |node| node.usage.cost)
-                + self.tree.usage_under(root).cost;
-            *self.pruned_cost.entry(session).or_default() += cost;
+            let own = self
+                .tree
+                .get(root)
+                .map_or_else(Usage::default, |node| node.usage);
+            let children = self.tree.usage_under(root);
+            let pruned = self.pruned_cost.entry(session).or_default();
+            pruned.0 += own.cost + children.cost;
+            pruned.1 = pruned.1.merge(own.cost_status).merge(children.cost_status);
             self.tree.remove_subtree(root);
         }
     }
@@ -1792,13 +1802,14 @@ fn is_live(node: &kage_core::protocol::AgentNode) -> bool {
 }
 
 /// The `usage_update` for `usage`, or `None` while the context window is
-/// unknown. Cost is left out until the model has pricing; the token
-/// totals ride under `_meta.kage`.
+/// unknown. Known zero costs are included; an unpriced total without
+/// a known subtotal omits cost. Token totals ride under `_meta.kage`.
 pub(super) fn usage_update(usage: &Usage) -> Option<SessionUpdate> {
     if usage.context_window == 0 {
         return None;
     }
-    let cost = (usage.cost > 0.0).then(|| Cost {
+    let known = usage.cost_status != kage_core::CostStatus::Incomplete;
+    let cost = (usage.cost > 0.0 || known).then(|| Cost {
         amount: usage.cost,
         currency: "USD".to_owned(),
     });
@@ -1807,6 +1818,7 @@ pub(super) fn usage_update(usage: &Usage) -> Option<SessionUpdate> {
         output: usage.total.output,
         cache_read: usage.total.cache_read,
         cache_write: usage.total.cache_write,
+        cost_status: wire_cost_status(usage.cost_status),
     };
     Some(SessionUpdate::UsageUpdate(UsageUpdate {
         used: usage.context_used,
@@ -1814,6 +1826,14 @@ pub(super) fn usage_update(usage: &Usage) -> Option<SessionUpdate> {
         cost,
         meta: Some(UsageMeta { kage: Some(tokens) }),
     }))
+}
+
+fn wire_cost_status(status: kage_core::CostStatus) -> kage_acp::acp::CostStatus {
+    match status {
+        kage_core::CostStatus::Recorded => kage_acp::acp::CostStatus::Recorded,
+        kage_core::CostStatus::Estimated => kage_acp::acp::CostStatus::Estimated,
+        kage_core::CostStatus::Incomplete => kage_acp::acp::CostStatus::Incomplete,
+    }
 }
 
 pub(super) fn text_content(text: String) -> ToolCallContent {
@@ -1860,6 +1880,7 @@ pub(super) fn agent_usage(node: &AgentNode) -> Option<SubagentUsage> {
         cache_read: usage.total.cache_read,
         cache_write: usage.total.cache_write,
         cost: usage.cost,
+        cost_status: wire_cost_status(usage.cost_status),
         run_ms: took.map(|took| u64::try_from(took.as_millis()).unwrap_or(u64::MAX)),
     })
 }

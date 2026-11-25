@@ -22,8 +22,8 @@
 
 use std::fmt::Write as _;
 
-use crate::TokenUsage;
 use crate::protocol::{SessionId, Usage};
+use crate::{CostStatus, TokenUsage};
 
 /// How an agent's run stands, as its report says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,7 +153,7 @@ impl AgentReport {
             let _ = write!(
                 text,
                 " model=\"{}\" tools=\"{}\" in=\"{}\" out=\"{}\" cache_read=\"{}\" \
-                 cache_write=\"{}\" cost=\"{:.4}\" ctx=\"{}\" win=\"{}\"",
+                 cache_write=\"{}\" cost=\"{}\" ctx=\"{}\" win=\"{}\"",
                 stats.model,
                 stats.tool_calls,
                 usage.total.input,
@@ -164,6 +164,11 @@ impl AgentReport {
                 usage.context_used,
                 usage.context_window,
             );
+            match usage.cost_status {
+                CostStatus::Recorded => {}
+                CostStatus::Estimated => text.push_str(" cost_status=\"estimated\""),
+                CostStatus::Incomplete => text.push_str(" cost_status=\"incomplete\""),
+            }
             if let Some(run_ms) = stats.run_ms {
                 let _ = write!(text, " run_ms=\"{run_ms}\"");
             }
@@ -222,9 +227,17 @@ impl AgentReport {
         let num =
             |key: &str| -> u64 { attr(key).and_then(|value| value.parse().ok()).unwrap_or(0) };
         let session = ulid::Ulid::from_string(attr("session")?).ok()?;
-        let recorded = ["tools", "model", "in", "out", "cost", "run_ms"]
-            .iter()
-            .any(|key| attr(key).is_some());
+        let recorded = [
+            "tools",
+            "model",
+            "in",
+            "out",
+            "cost",
+            "cost_status",
+            "run_ms",
+        ]
+        .iter()
+        .any(|key| attr(key).is_some());
         let stats = recorded.then(|| ReportStats {
             model: attr("model")
                 .map(crate::canonical_model)
@@ -242,6 +255,11 @@ impl AgentReport {
                 cost: attr("cost")
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(0.0),
+                cost_status: match attr("cost_status") {
+                    Some("estimated") => CostStatus::Estimated,
+                    Some("incomplete") => CostStatus::Incomplete,
+                    _ => CostStatus::Recorded,
+                },
                 ..Usage::default()
             },
             run_ms: attr("run_ms").and_then(|value| value.parse().ok()),
@@ -434,6 +452,7 @@ mod tests {
                     context_used: 4000,
                     context_window: 200_000,
                     cost: 0.012,
+                    cost_status: CostStatus::Recorded,
                     context_estimated: false,
                 },
                 run_ms: Some(4200),
@@ -443,13 +462,53 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_report_reads_as_the_engine_has_always_written_it() {
+    fn a_report_keeps_cost_precision_across_replay() {
+        let mut report = finished(ReportState::Completed);
+        let amount = 0.000_031_234_567_891;
+        report.stats.as_mut().unwrap().usage.cost = amount;
+        let parsed = AgentReport::parse(&report.to_text()).unwrap();
+        assert_eq!(parsed.stats.unwrap().usage.cost.to_bits(), amount.to_bits());
+    }
+
+    #[test]
+    fn a_finished_report_contains_the_recorded_stats() {
         assert_eq!(
             finished(ReportState::Completed).to_text(),
             "<agent name=\"general\" session=\"01K62W8Q3T9V5M2C7X4B1N0R6S\" state=\"completed\" \
              model=\"anthropic/claude\" tools=\"3\" in=\"1200\" out=\"300\" cache_read=\"5\" \
-             cache_write=\"6\" cost=\"0.0120\" ctx=\"4000\" win=\"200000\" run_ms=\"4200\">\n\
+             cache_write=\"6\" cost=\"0.012\" ctx=\"4000\" win=\"200000\" run_ms=\"4200\">\n\
              the reply\n</agent>"
+        );
+    }
+
+    #[test]
+    fn reports_preserve_nondefault_cost_status() {
+        let report = finished(ReportState::Completed);
+        for status in ["estimated", "incomplete"] {
+            let text =
+                report
+                    .to_text()
+                    .replacen(">\n", &format!(" cost_status=\"{status}\">\n"), 1);
+            let parsed = AgentReport::parse(&text).unwrap();
+            assert!(
+                parsed
+                    .to_text()
+                    .contains(&format!("cost_status=\"{status}\""))
+            );
+            assert_eq!(AgentReport::parse(&parsed.to_text()), Some(parsed));
+        }
+    }
+
+    #[test]
+    fn a_report_with_only_cost_status_has_stats() {
+        let report = AgentReport::header(
+            "<agent name=\"general\" session=\"01K62W8Q3T9V5M2C7X4B1N0R6S\" \
+             state=\"completed\" cost_status=\"incomplete\">",
+        )
+        .unwrap();
+        assert_eq!(
+            report.stats.unwrap().usage.cost_status,
+            CostStatus::Incomplete
         );
     }
 

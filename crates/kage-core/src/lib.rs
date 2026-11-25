@@ -10,6 +10,7 @@ pub mod cancel;
 pub mod catalog_url;
 pub mod config;
 pub mod config_edit;
+pub mod cost_status;
 pub mod environment;
 pub mod error;
 pub mod event;
@@ -43,6 +44,7 @@ pub use catalog_url::{
 pub use config::{
     AgentsConfig, Config, KeybindingsConfig, PluginsConfig, ProviderConfig, UiConfig,
 };
+pub use cost_status::CostStatus;
 pub use error::{Error, Result};
 pub use event::{
     LoopError, LoopEvent, ModelCost, StopReason, TokenCost, TokenUsage, ToolMedia, ToolOutput,

@@ -12,6 +12,7 @@
 mod agent_tool;
 mod agents;
 mod bus;
+mod cost;
 mod edit_image_tool;
 mod image_tool;
 pub(crate) mod images;
@@ -60,6 +61,7 @@ use kage_tools::ToolRegistry;
 use self::swarm_tool::SwarmInfo;
 
 pub(crate) use bus::{Subscriber, SubscriptionId, answering};
+pub(crate) use cost::usage_from_replay;
 pub(crate) use media_tool::WithMediaTools;
 pub(crate) use recorder::Recorder;
 pub(crate) use sessions::render_session_markdown;
@@ -107,6 +109,8 @@ pub(crate) struct SessionSpec {
     /// Provider-qualified model id.
     pub model: String,
     pub cx: AgentContext,
+    /// Billable totals restored from the recording, separate from inherited context.
+    pub initial_usage: Option<Usage>,
     pub recorder: Option<Recorder>,
     pub tools: ToolRegistry,
     pub plugins: Option<Arc<dyn SessionPlugins>>,
@@ -834,6 +838,7 @@ impl Dispatcher {
             id,
             model,
             cx,
+            initial_usage,
             recorder,
             tools,
             plugins,
@@ -845,7 +850,8 @@ impl Dispatcher {
             agents,
             shell,
         } = spec;
-        let usage = usage_of(&cx);
+        let mut usage = initial_usage.unwrap_or_else(|| usage_of(&cx));
+        usage.context_window = cx.context_window;
         let output_cap = pinned_output_cap(&cx, &self.registry, &model);
         let state = self.opening_state(id, &model, &cx, &gate);
         self.bus.publish(id, HostEvent::UsageUpdated { usage });
@@ -2367,6 +2373,7 @@ fn usage_of(cx: &AgentContext) -> Usage {
         context_used: cx.budget.current_context,
         context_window: cx.context_window,
         cost: 0.0,
+        cost_status: kage_core::CostStatus::default(),
         context_estimated: false,
     }
 }

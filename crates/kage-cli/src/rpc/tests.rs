@@ -426,6 +426,7 @@ fn test_host_with_plugins(
                             .with_workdir(&workdir)
                             .with_context_window(WINDOW)
                     },
+                    initial_usage: None,
                     recorder: None,
                     tools,
                     gate,
@@ -4577,7 +4578,7 @@ fn only_live_servers_offer_commands_and_bare_prompts_take_no_input() {
 }
 
 #[test]
-fn usage_updates_carry_tokens_and_cost_only_when_priced() {
+fn usage_updates_carry_tokens_and_known_zero_costs() {
     let mut usage = Usage {
         context_used: 50,
         context_window: 200,
@@ -4586,7 +4587,8 @@ fn usage_updates_carry_tokens_and_cost_only_when_priced() {
     let Some(SessionUpdate::UsageUpdate(update)) = usage_update(&usage) else {
         panic!("no usage_update");
     };
-    assert_eq!((update.used, update.size, update.cost), (50, 200, None));
+    assert_eq!((update.used, update.size), (50, 200));
+    assert!(update.cost.unwrap().amount.abs() < f64::EPSILON);
     usage.total.input = 30;
     usage.total.cache_read = 12;
     let Some(SessionUpdate::UsageUpdate(update)) = usage_update(&usage) else {
@@ -4602,6 +4604,106 @@ fn usage_updates_carry_tokens_and_cost_only_when_priced() {
     assert_eq!((cost.amount, cost.currency.as_str()), (0.25, "USD"));
     usage.context_window = 0;
     assert!(usage_update(&usage).is_none());
+}
+
+#[test]
+fn usage_updates_distinguish_recorded_estimated_and_incomplete_costs() {
+    for (status, expected) in [
+        (
+            kage_core::CostStatus::Recorded,
+            kage_acp::acp::CostStatus::Recorded,
+        ),
+        (
+            kage_core::CostStatus::Estimated,
+            kage_acp::acp::CostStatus::Estimated,
+        ),
+        (
+            kage_core::CostStatus::Incomplete,
+            kage_acp::acp::CostStatus::Incomplete,
+        ),
+    ] {
+        let usage = Usage {
+            total: usage(30, 10),
+            context_window: WINDOW,
+            cost: 0.25,
+            cost_status: status,
+            ..Usage::default()
+        };
+        let Some(SessionUpdate::UsageUpdate(update)) = usage_update(&usage) else {
+            panic!("expected usage");
+        };
+        assert!((update.cost.unwrap().amount - 0.25).abs() < 1e-12);
+        assert_eq!(update.meta.unwrap().kage.unwrap().cost_status, expected);
+    }
+    let mut usage = Usage {
+        total: usage(30, 10),
+        context_window: WINDOW,
+        ..Usage::default()
+    };
+    let Some(SessionUpdate::UsageUpdate(free)) = usage_update(&usage) else {
+        panic!("expected usage");
+    };
+    assert!(free.cost.unwrap().amount.abs() < f64::EPSILON);
+    usage.cost_status = kage_core::CostStatus::Incomplete;
+    let Some(SessionUpdate::UsageUpdate(unknown)) = usage_update(&usage) else {
+        panic!("expected usage");
+    };
+    assert!(unknown.cost.is_none());
+}
+
+#[test]
+fn a_loaded_session_reports_saved_costs_without_the_original_provider() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let accepted = message(
+        Role::Assistant,
+        vec![text("saved answer")],
+        Some(usage(100, 20)),
+    );
+    let rejected = kage_session::RejectedUsage {
+        usage: usage(50, 10),
+    }
+    .into_entry(EntryId::new(), chrono::Utc::now());
+    let price = |entry: &SessionEntry, model: &str, amount| {
+        kage_session::UsageCost {
+            entry: entry.id(),
+            model: model.into(),
+            amount: Some(amount),
+        }
+        .into_entry(EntryId::new(), chrono::Utc::now())
+        .unwrap()
+    };
+    let session = record(
+        dir.path(),
+        &cwd,
+        "unavailable/original",
+        1,
+        &[
+            message(Role::User, vec![text("saved prompt")], None),
+            price(&accepted, "unavailable/original", 0.25),
+            accepted,
+            price(&rejected, "unavailable/other", 0.1),
+            rejected,
+        ],
+    );
+    let h = serve(Vec::new(), dir.path(), dir.path());
+    h.client
+        .request(
+            "session/load",
+            serde_json::json!({
+                "sessionId": session,
+                "cwd": cwd,
+                "mcpServers": []
+            }),
+        )
+        .unwrap();
+    let updates = updates_until(&h.inbox, &session, "usage_update");
+    let usage = &updates.last().unwrap()["update"];
+    assert!((usage["cost"]["amount"].as_f64().unwrap() - 0.35).abs() < 1e-12);
+    assert_eq!(usage["_meta"]["kage"]["input"], 150);
+    assert_eq!(usage["_meta"]["kage"]["output"], 30);
+    assert_eq!(usage["used"], 120);
+    assert!(usage["_meta"]["kage"].get("costStatus").is_none());
 }
 
 fn kind(update: &SessionUpdate) -> &'static str {
@@ -8631,6 +8733,7 @@ fn default_spec() -> SessionSpec {
         id: SessionId::new(),
         model: "mock/m".to_owned(),
         cx: AgentContext::new("mock/m", ""),
+        initial_usage: None,
         recorder: None,
         tools: builtin_registry(),
         gate: PermissionGate::new(PermissionsConfig::default()),

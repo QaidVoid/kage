@@ -27,7 +27,8 @@ use ulid::Ulid;
 
 use crate::permissions::PermissionAction;
 use crate::{
-    Content, LoopError, LoopEvent, Message, Modalities, ThinkingLevel, TokenUsage, ToolCallId,
+    Content, CostStatus, LoopError, LoopEvent, Message, Modalities, ThinkingLevel, TokenUsage,
+    ToolCallId,
 };
 
 /// Stable identifier for one session.
@@ -533,6 +534,9 @@ pub struct Usage {
     pub context_window: u64,
     /// Cumulative cost in dollars. `0.0` when the model has no pricing.
     pub cost: f64,
+    /// Whether the cost is recorded, estimated, or missing some usage.
+    #[serde(default, skip_serializing_if = "CostStatus::is_recorded")]
+    pub cost_status: CostStatus,
     /// Whether `context_used` is a compaction's estimate rather than a
     /// turn's reported usage.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1154,6 +1158,7 @@ mod tests {
                     context_used: 900,
                     context_window: 200_000,
                     cost: 0.123_456_789,
+                    cost_status: CostStatus::Estimated,
                     context_estimated: true,
                 },
             },

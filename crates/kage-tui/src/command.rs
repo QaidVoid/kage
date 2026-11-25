@@ -694,6 +694,14 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         subcommands: &[],
     },
     CommandSpec {
+        name: "notifications",
+        aliases: &[],
+        description: "review notification history and mark messages reviewed",
+        category: CommandCategory::Both,
+        args: &[],
+        subcommands: &[],
+    },
+    CommandSpec {
         name: "reload",
         aliases: &[],
         description: "reload init.lua and plugins",
@@ -825,7 +833,7 @@ mod tests {
 
     #[test]
     fn builtin_registry_has_expected_command_count() {
-        assert_eq!(BUILTIN_COMMANDS.len(), 33);
+        assert_eq!(BUILTIN_COMMANDS.len(), 34);
     }
 
     #[test]

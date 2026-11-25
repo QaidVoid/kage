@@ -43,7 +43,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use kage_client::wire::{
@@ -77,7 +76,6 @@ use serde_json::Value;
 
 use super::entry::{Frontend, startup_config};
 use super::*;
-use kage_tui::hostlog::LogPublisher;
 
 /// What the connection delivered.
 #[derive(Debug)]
@@ -1589,6 +1587,8 @@ struct Pump {
     /// Where an export writes once the agent answers.
     pending_export: Option<PathBuf>,
     pending_media: HashMap<u64, (ImageAction, Option<String>)>,
+    /// Background requests whose failures are notifications, not turn output.
+    operational_requests: HashSet<u64>,
     media_opener: MediaOpener,
     /// Update kinds this build cannot show, warned of once each.
     unknown: HashSet<String>,
@@ -1696,7 +1696,8 @@ impl Pump {
 
     fn command_note(&mut self, note: CommandNote) {
         match note {
-            CommandNote::Notice(level, text) => self.notice(level, text),
+            CommandNote::Notice(level, text) => self.conversation_notice(level, text),
+            CommandNote::Notification(level, text) => self.toast(level, text),
             CommandNote::Reloaded => self.plugins_reloaded(),
         }
     }
@@ -1711,7 +1712,8 @@ impl Pump {
             return;
         }
         let wire = self.wire.clone();
-        self.store.client().plugins_resync(&wire);
+        let request = self.store.client().plugins_resync(&wire);
+        self.operational_requests.insert(request);
     }
 
     fn send_plugin_answer(&mut self, (id, answer): PluginAnswer) {
@@ -1803,6 +1805,13 @@ impl Pump {
     /// A failed prompt is reported once: by the run it ends, or by
     /// handing the prompt back, not again as a failed request.
     fn absorb(&mut self, frame: Frame) {
+        if let Frame::Success {
+            id: RequestId::Number(id),
+            ..
+        } = &frame
+        {
+            self.operational_requests.remove(id);
+        }
         if self.route_plugin_request(&frame) {
             return;
         }
@@ -2627,6 +2636,17 @@ impl Pump {
     }
 
     /// Turns one handled frame's changes into the App's signals.
+    fn request_failed(&mut self, request: u64, error: &RpcError) {
+        let media = self.pending_media.remove(&request).is_some();
+        let recall = self.recalls.remove(&request).is_some();
+        let text = format!("kage agent: {}", error.message);
+        if self.operational_requests.remove(&request) || media || recall {
+            self.toast(NoticeLevel::Error, text);
+        } else {
+            self.conversation_notice(NoticeLevel::Error, text);
+        }
+    }
+
     fn react(&mut self, change: Change) {
         match change {
             Change::Session { id } => {
@@ -2681,14 +2701,10 @@ impl Pump {
                 } else {
                     NoticeLevel::Info
                 };
-                self.notice(level, output.text);
+                self.conversation_notice(level, output.text);
             }
             Change::Dialog => self.dialogs_moved(),
-            Change::Failed { request, error } => {
-                self.pending_media.remove(&request);
-                self.recalls.remove(&request);
-                self.notice(NoticeLevel::Error, format!("kage agent: {}", error.message));
-            }
+            Change::Failed { request, error } => self.request_failed(request, &error),
             Change::MediaRead {
                 request,
                 session,
@@ -4446,7 +4462,8 @@ impl Pump {
     }
 
     fn refresh_providers(&mut self) {
-        self.store.client().providers_reload();
+        let request = self.store.client().providers_reload();
+        self.operational_requests.insert(request);
         self.store.client().models_list();
         if let Some(registry) = (self.rebuild_models)() {
             self.registry = registry;
@@ -4569,6 +4586,10 @@ impl Pump {
     }
 
     fn notice(&mut self, level: NoticeLevel, text: String) {
+        self.toast(level, text);
+    }
+
+    fn conversation_notice(&mut self, level: NoticeLevel, text: String) {
         self.publish(HostEvent::Notice {
             level,
             text,
@@ -4733,8 +4754,10 @@ enum CommandJob {
 
 /// What the command thread reports to the pump.
 enum CommandNote {
-    /// A notice to publish.
+    /// Output explicitly returned by a command for the conversation.
     Notice(NoticeLevel, String),
+    /// Operational feedback retained in notification history.
+    Notification(NoticeLevel, String),
     /// The plugins reloaded, so the agent reads their registrations
     /// again.
     Reloaded,
@@ -4771,7 +4794,7 @@ fn reload_plugins(
     let report = match report {
         Ok(report) => report,
         Err(err) => {
-            let _ = notes.send(CommandNote::Notice(
+            let _ = notes.send(CommandNote::Notification(
                 NoticeLevel::Error,
                 format!("plugin reload: {err}"),
             ));
@@ -4783,9 +4806,9 @@ fn reload_plugins(
         Some(Err(_)) => ", init.lua failed",
         None => "",
     };
-    for err in &report.keymap_errors {
-        let _ = notes.send(CommandNote::Notice(NoticeLevel::Error, err.clone()));
-    }
+    let failed = !report.failed.is_empty()
+        || !report.keymap_errors.is_empty()
+        || matches!(report.init, Some(Err(_)));
     let summary = if report.failed.is_empty() {
         format!("plugins reloaded ({} loaded{init})", report.loaded.len())
     } else {
@@ -4795,13 +4818,14 @@ fn reload_plugins(
             report.failed.len()
         )
     };
-    let _ = notes.send(CommandNote::Notice(NoticeLevel::Info, summary));
-    for (path, err) in report.failed {
-        let _ = notes.send(CommandNote::Notice(
-            NoticeLevel::Error,
-            format!("plugin {}: {err}", path.display()),
-        ));
-    }
+    let _ = notes.send(CommandNote::Notification(
+        if failed {
+            NoticeLevel::Warning
+        } else {
+            NoticeLevel::Success
+        },
+        summary,
+    ));
     let _ = notes.send(CommandNote::Reloaded);
 }
 
@@ -4897,19 +4921,18 @@ fn watch_plugins(
     dir: Option<PathBuf>,
     user: Option<PathBuf>,
     requests: mpsc::Sender<RunRequest>,
-    buffer: &SharedBuffer,
+    sink: &kage_plugin::SharedHostLog,
 ) {
-    let errors = buffer.clone();
+    let errors = sink.clone();
     let spawned = thread::Builder::new()
         .name("kage-plugin-watch".to_owned())
         .spawn(move || {
             let watcher = match kage_plugin::PluginWatcher::for_config(dir, user) {
                 Ok(watcher) => watcher,
                 Err(err) => {
-                    lock(&errors).push_custom(
-                        "kage:error",
-                        format!("plugin watcher: {err}"),
-                        false,
+                    lock(&errors).log(
+                        kage_plugin::LogLevel::Error,
+                        &format!("plugin watcher: {err}"),
                     );
                     return;
                 }
@@ -4922,7 +4945,10 @@ fn watch_plugins(
             }
         });
     if let Err(err) = spawned {
-        lock(buffer).push_custom("kage:error", format!("plugin watcher: {err}"), false);
+        lock(sink).log(
+            kage_plugin::LogLevel::Error,
+            &format!("plugin watcher: {err}"),
+        );
     }
 }
 
@@ -5166,12 +5192,11 @@ pub(crate) fn run(
     // The plugins load in this process, like the engine path builds its
     // runtime: tools, commands, handlers and the UI surfaces run beside
     // the pump, and the session names this process the plugin host.
-    let log_publisher: Arc<OnceLock<LogPublisher>> = Arc::default();
-    let sink = buffer_host_log(buffer.clone(), toasts.clone(), Arc::clone(&log_publisher));
+    let sink = notification_host_log(toasts.clone());
     let plugins_dir_path = match crate::plugins_dir() {
         Ok(dir) => Some(dir),
         Err(e) => {
-            lock(&buffer).push_custom("kage:error", e, false);
+            lock(&sink).log(kage_plugin::LogLevel::Error, &e);
             None
         }
     };
@@ -5199,7 +5224,7 @@ pub(crate) fn run(
     ) {
         Ok(rt) => Some(rt),
         Err(e) => {
-            lock(&buffer).push_custom("kage:error", e, false);
+            lock(&sink).log(kage_plugin::LogLevel::Error, &e);
             None
         }
     };
@@ -5266,7 +5291,8 @@ pub(crate) fn run(
     let registry = Arc::new(registry);
     let app_session = SessionId::new();
     let main_view = Arc::new(Mutex::new(app_session));
-    let store = Store::new();
+    let mut store = Store::new();
+    store.set_notifications(toasts.clone());
     let (frames_tx, frames_rx) = crossbeam_channel::unbounded();
     let upstream = match upstream {
         Upstream::Decide { standalone } => choose_upstream(standalone, &workdir),
@@ -5301,7 +5327,7 @@ pub(crate) fn run(
             plugins_dir_path.clone(),
             user_dir.clone(),
             requests_tx.clone(),
-            &buffer,
+            &sink,
         );
     }
     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
@@ -5382,6 +5408,7 @@ pub(crate) fn run(
         next_ask: 0,
         pending_export: None,
         pending_media: HashMap::new(),
+        operational_requests: HashSet::new(),
         media_opener: crate::engine::images::open,
         unknown: HashSet::new(),
         mcp_warnings: HashSet::new(),
@@ -5408,24 +5435,6 @@ pub(crate) fn run(
     } else {
         pump.store.shared_buffer(&pump.wire)
     };
-    let log_events = events_tx.clone();
-    let _ = log_publisher.set(Box::new(move |level, message| {
-        let level = match level {
-            kage_plugin::LogLevel::Error => NoticeLevel::Error,
-            kage_plugin::LogLevel::Warn => NoticeLevel::Warning,
-            _ => NoticeLevel::Info,
-        };
-        let _ = log_events.send(Envelope {
-            session: *lock(&main_view),
-            seq: 0,
-            event: HostEvent::Notice {
-                level,
-                text: message.to_owned(),
-                transient: false,
-            }
-            .into(),
-        });
-    }));
     if let Err(error) = thread::Builder::new()
         .name("kage-acp-pump".to_owned())
         .spawn(move || pump.serve())
@@ -5636,22 +5645,16 @@ mod tests {
         .unwrap();
         let buffer = shared_buffer();
         let toasts = shared_toasts();
-        let publisher: Arc<OnceLock<LogPublisher>> = Arc::default();
-        let sink = buffer_host_log(buffer.clone(), toasts.clone(), Arc::clone(&publisher));
+        let sink = notification_host_log(toasts.clone());
         let (events, received) = crossbeam_channel::unbounded();
         let transport = Transport::memory(None, "test", false, events, sink).unwrap();
-        assert!(lock(&buffer).blocks().iter().any(|block| matches!(
-            block.as_ref(),
-            kage_tui::buffer::Block::Custom { text, .. } if text.contains(MARKER)
-        )));
-        let startup_blocks = lock(&buffer).blocks().len();
-        let (log_sender, log_messages) = mpsc::channel();
+        assert!(lock(&buffer).blocks().is_empty());
         assert!(
-            publisher
-                .set(Box::new(move |level, message| {
-                    log_sender.send((level, message.to_owned())).unwrap();
-                }))
-                .is_ok()
+            lock(&toasts)
+                .history
+                .iter()
+                .any(|entry| entry.kind == kage_tui::toast::ToastKind::Warning
+                    && entry.text.contains(MARKER))
         );
         for (id, method, params) in [
             (1, "initialize", serde_json::json!({"protocolVersion": 1})),
@@ -5674,12 +5677,25 @@ mod tests {
                 }
             }
         }
+        assert!(lock(&buffer).blocks().is_empty());
+        let state = lock(&toasts);
+        let warning = state
+            .history
+            .iter()
+            .find(|entry| {
+                entry.kind == kage_tui::toast::ToastKind::Warning && entry.text.contains(MARKER)
+            })
+            .unwrap();
+        assert_eq!(warning.count, 2);
         assert_eq!(
-            log_messages.recv_timeout(Duration::from_secs(10)).unwrap(),
-            (kage_plugin::LogLevel::Warn, MARKER.to_owned()),
+            state
+                .history
+                .iter()
+                .filter(|entry| entry.text.contains(MARKER))
+                .count(),
+            2
         );
-        assert_eq!(lock(&buffer).blocks().len(), startup_blocks);
-        assert_eq!(lock(&toasts).len(), 2);
+        drop(state);
         drop(transport);
     }
 
@@ -6102,6 +6118,7 @@ mod tests {
             next_ask: 0,
             pending_export: None,
             pending_media: HashMap::new(),
+            operational_requests: HashSet::new(),
             media_opener: crate::engine::images::open,
             unknown: HashSet::new(),
             mcp_warnings: HashSet::new(),
@@ -7438,6 +7455,60 @@ mod tests {
         ));
         assert!(rebuilt.load(std::sync::atomic::Ordering::SeqCst));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn background_provider_reload_failures_are_retained_as_notifications() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.refresh_providers();
+        let request = pump
+            .store
+            .take_outgoing()
+            .into_iter()
+            .find_map(|frame| match frame {
+                Frame::Request { id, method, .. } if method == "_kage/providers/reload" => Some(id),
+                _ => None,
+            })
+            .unwrap();
+        pump.absorb(Frame::Failure {
+            id: request,
+            error: RpcError::new(-32603, "invalid provider configuration"),
+        });
+        assert!(pump.operational_requests.is_empty());
+        let notices: Vec<_> = app
+            .try_iter()
+            .filter_map(|envelope| match envelope.event {
+                kage_core::protocol::Event::Host(HostEvent::Notice {
+                    text, transient, ..
+                }) => Some((text, transient)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].0.contains("invalid provider configuration"));
+        assert!(notices[0].1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn successful_background_requests_do_not_accumulate_routing_state() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        pump.refresh_providers();
+        let request = pump
+            .store
+            .take_outgoing()
+            .into_iter()
+            .find_map(|frame| match frame {
+                Frame::Request { id, method, .. } if method == "_kage/providers/reload" => Some(id),
+                _ => None,
+            })
+            .unwrap();
+        pump.absorb(Frame::Success {
+            id: request,
+            result: serde_json::json!({}),
+        });
+        assert!(pump.operational_requests.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A child transcript replayed whole goes to the App in transcript

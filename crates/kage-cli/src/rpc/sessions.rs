@@ -493,6 +493,7 @@ pub(super) fn windowed_updates(timeline: &[TimelineItem], limit: u32) -> Vec<Ses
         updates.push(SessionUpdate::Notice(NoticeUpdate {
             tone: NoticeTone::Info,
             text,
+            transient: false,
         }));
     }
     updates.extend(replay_updates(tail, opener));

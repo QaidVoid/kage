@@ -101,7 +101,7 @@ fn draw(terminal: &mut Terminal<TestBackend>, buffer: &mut Buffer) {
                     ..Heights::default()
                 },
             );
-            view::render(
+            let _ = view::render(
                 frame,
                 regions,
                 buffer,

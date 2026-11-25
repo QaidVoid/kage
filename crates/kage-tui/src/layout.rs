@@ -1,5 +1,4 @@
-//! Five-region layout: header, conversation buffer, activity row,
-//! input, footer.
+//! Layout regions: header, conversation buffer, activity, input, and footer.
 //!
 //! ratatui already implements differential rendering, so this crate's
 //! "layout engine" is a thin helper over [`ratatui::layout::Layout`]

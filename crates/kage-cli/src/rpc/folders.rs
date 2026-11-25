@@ -224,12 +224,8 @@ mod tests {
         std::fs::create_dir(dir.path().join("good")).unwrap();
         let raw = OsStr::from_bytes(b"\xffnot-utf8");
         std::fs::create_dir(dir.path().join(raw)).unwrap();
-        let buffer = kage_tui::events::shared_buffer();
-        let sink = kage_tui::hostlog::buffer_host_log(
-            buffer.clone(),
-            kage_tui::toast::shared_toasts(),
-            std::sync::Arc::default(),
-        );
+        let toasts = kage_tui::toast::shared_toasts();
+        let sink = kage_tui::hostlog::notification_host_log(toasts.clone());
         let listed = folders(
             &FoldersRequest {
                 path: Some(dir.path().display().to_string()),
@@ -240,12 +236,17 @@ mod tests {
         assert_eq!(listed.folders, ["good"]);
         assert_eq!(listed.skipped, 1);
         assert!(!listed.truncated);
-        let buffer = kage_core::sync::lock(&buffer);
-        assert!(matches!(
-            buffer.blocks()[0].as_ref(),
-            kage_tui::buffer::Block::Custom { text, .. }
-                if text.contains("[Warn] folders: skipped a non-UTF8 name")
-        ));
+        let notifications = kage_core::sync::lock(&toasts);
+        assert_eq!(notifications.history.len(), 1);
+        assert_eq!(
+            notifications.history[0].kind,
+            kage_tui::toast::ToastKind::Warning
+        );
+        assert!(
+            notifications.history[0]
+                .text
+                .starts_with("folders: skipped a non-UTF8 name")
+        );
     }
 
     #[test]

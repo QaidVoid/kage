@@ -390,6 +390,25 @@ fn the_activity_row_shows_while_working_with_elapsed_seconds() {
     });
     let row = row.unwrap_or_else(|| panic!("{rows:?}"));
     assert!(rows[row + 1].starts_with('\u{2500}'), "{rows:?}");
+    crate::toast::push_toast(
+        app.toasts.as_ref().unwrap(),
+        Toast::info("floating notification"),
+    );
+    let with_notification = snapshot_rows(&render_app(&mut app));
+    assert!(
+        with_notification
+            .iter()
+            .any(|row| row.contains("floating notification")),
+        "{with_notification:?}"
+    );
+    assert!(
+        with_notification[row].contains("Working"),
+        "{with_notification:?}"
+    );
+    assert!(
+        with_notification[row + 1].starts_with('\u{2500}'),
+        "{with_notification:?}"
+    );
     app.run_started = Instant::now().checked_sub(Duration::from_secs(14));
     lock(&buffer).push_tool_call(
         "c1",
@@ -681,40 +700,170 @@ fn a_frame_with_a_toast_carries_no_blink() {
 }
 
 #[test]
-fn a_toast_overlays_the_conversation_without_shifting_it() {
+fn an_info_card_overlays_only_the_buffer_without_reserving_a_row() {
     let buffer = shared_buffer();
-    lock(&buffer).push_custom(
-        "kage:error",
-        "init.lua: lua error: syntax error: [string \"init.lua\"]:3: unexpected symbol near 'end' \
-         while loading the user configuration",
-        false,
-    );
+    for i in 0..20 {
+        lock(&buffer).push_user(format!("conversation row {i}"));
+    }
     let (tx, _rx) = mpsc::channel();
     let mut app = app_with_defaults(buffer, tx);
+    type_str(&mut app, "keep this draft");
     let toasts = crate::toast::shared_toasts();
     app.set_toasts(toasts.clone());
-    let render = |app: &mut App| {
-        let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
-        app.render_into(&mut terminal).unwrap();
-        snapshot_rows(&terminal)
+    let plain = rendered(&mut app, 60, 16);
+    let geometry = || {
+        let buffer = lock(&app.buffer);
+        (
+            buffer.last_area_y(),
+            buffer.last_area_height(),
+            buffer.last_virtual_top(),
+        )
     };
-    let plain = render(&mut app);
+    let (top, height, virtual_top) = geometry();
+    let bottom = usize::from(top + height);
+    assert!(plain[bottom].starts_with('\u{2500}'), "{plain:#?}");
+    assert!(app.toast_hit.is_none());
     crate::toast::push_toast(&toasts, Toast::info("switched to fake:m"));
-    let rows = render(&mut app);
+    let rows = rendered(&mut app, 60, 16);
+    let hit = app.toast_hit.expect("the floating card is visible");
     assert!(
-        rows.iter().any(|r| r.contains("switched to fake:m")),
+        rows.iter().any(|row| row.contains("switched to fake:m")),
         "{rows:#?}"
     );
-    // Exactly the toast's own row differs: the card paints over the
-    // conversation instead of taking a row and shifting the text.
-    let changed: Vec<usize> = rows
-        .iter()
-        .zip(&plain)
-        .enumerate()
-        .filter_map(|(y, (r, p))| (r != p).then_some(y))
-        .collect();
-    assert_eq!(changed.len(), 1, "{rows:#?}");
-    assert!(rows[changed[0]].contains("switched to fake:m"), "{rows:#?}");
+    assert!(hit.area.y >= top);
+    assert!(hit.area.bottom() <= top + height);
+    {
+        let buffer = lock(&app.buffer);
+        assert_eq!(buffer.last_area_y(), top);
+        assert_eq!(buffer.last_area_height(), height);
+        assert_eq!(buffer.last_virtual_top(), virtual_top);
+    }
+    assert_eq!(&rows[bottom..], &plain[bottom..]);
+    assert_eq!(app.input.text(), "keep this draft");
+    for (y, (row, original)) in rows.iter().zip(&plain).enumerate() {
+        if y < usize::from(hit.area.y) || y >= usize::from(hit.area.bottom()) {
+            assert_eq!(row, original, "outside the card at row {y}");
+        }
+    }
+    crate::toast::prune_expired(
+        &toasts,
+        Instant::now() + crate::toast::DEFAULT_TOAST_DURATION + Duration::from_secs(1),
+    );
+    let expired = rendered(&mut app, 60, 16);
+    assert_eq!(
+        expired, plain,
+        "expiry must restore covered conversation cells"
+    );
+    assert!(app.toast_hit.is_none());
+    let buffer = lock(&app.buffer);
+    assert_eq!(buffer.last_area_y(), top);
+    assert_eq!(buffer.last_area_height(), height);
+    assert_eq!(buffer.last_virtual_top(), virtual_top);
+}
+
+#[test]
+fn consecutive_frames_restore_cells_after_queue_advance_move_and_removal() {
+    use crate::view::toast::ToastPosition;
+    use ratatui::layout::{Position, Rect};
+
+    let (mut app, _rx, _events) = app_with_events();
+    let text = (0..30)
+        .map(|i| format!("underlying row {i:02}: alpha beta gamma delta epsilon zeta eta theta"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    lock(&app.buffer).append_assistant_delta(&text);
+    lock(&app.buffer).finish_streaming();
+    app.set_scroll(0);
+    type_str(&mut app, "draft remains intact");
+    let toasts = app.toasts.as_ref().unwrap().clone();
+    let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+    app.render_into(&mut terminal).unwrap();
+    let plain = terminal.backend().buffer().clone();
+    let geometry = {
+        let buffer = lock(&app.buffer);
+        (
+            buffer.last_area_y(),
+            buffer.last_area_height(),
+            buffer.last_virtual_top(),
+        )
+    };
+    let assert_outside_restored = |terminal: &Terminal<TestBackend>, card: Rect| {
+        let actual = terminal.backend().buffer();
+        for y in plain.area.y..plain.area.bottom() {
+            for x in plain.area.x..plain.area.right() {
+                if !card.contains(Position::new(x, y)) {
+                    assert_eq!(
+                        actual[(x, y)],
+                        plain[(x, y)],
+                        "unrestored cell at ({x}, {y})"
+                    );
+                }
+            }
+        }
+    };
+    app.notify("long card covers underlying conversation cells across several rows\nsecond long diagnostic line\nthird long diagnostic line");
+    app.notify("short next");
+    app.render_into(&mut terminal).unwrap();
+    let long = app.toast_hit.unwrap();
+    assert_outside_restored(&terminal, long.area);
+    let rows = snapshot_rows(&terminal);
+    assert!(
+        rows.iter().any(|row| row.contains("long card covers")),
+        "{rows:?}"
+    );
+    assert!(rows.iter().any(|row| row.contains("+1")), "{rows:?}");
+    assert!(
+        rows.iter().all(|row| !row.contains("short next")),
+        "{rows:?}"
+    );
+
+    assert!(lock(&toasts).dismiss(long.toast_id));
+    app.render_into(&mut terminal).unwrap();
+    let short = app.toast_hit.unwrap();
+    assert_ne!(short.toast_id, long.toast_id);
+    assert!(short.area.width < long.area.width);
+    assert!(short.area.height < long.area.height);
+    assert_outside_restored(&terminal, short.area);
+    let rows = snapshot_rows(&terminal);
+    assert!(
+        rows.iter().any(|row| row.contains("short next")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains("long card covers")),
+        "{rows:?}"
+    );
+
+    app.toast_position = ToastPosition::TopLeft;
+    app.render_into(&mut terminal).unwrap();
+    let moved = app.toast_hit.unwrap();
+    assert_eq!(moved.toast_id, short.toast_id);
+    assert_ne!(moved.area.as_position(), short.area.as_position());
+    assert_outside_restored(&terminal, moved.area);
+    assert!(lock(&toasts).dismiss(moved.toast_id));
+    app.render_into(&mut terminal).unwrap();
+    assert!(app.toast_hit.is_none());
+    assert_eq!(terminal.backend().buffer(), &plain);
+
+    app.notify("expires on the same terminal");
+    app.render_into(&mut terminal).unwrap();
+    assert!(app.toast_hit.is_some());
+    let deadline = lock(&toasts).active[0].deadline().unwrap();
+    crate::toast::prune_expired(&toasts, deadline + Duration::from_secs(1));
+    app.render_into(&mut terminal).unwrap();
+    assert!(app.toast_hit.is_none());
+    assert_eq!(terminal.backend().buffer(), &plain);
+    assert_eq!(app.input.text(), "draft remains intact");
+    let buffer = lock(&app.buffer);
+    assert_eq!(
+        (
+            buffer.last_area_y(),
+            buffer.last_area_height(),
+            buffer.last_virtual_top()
+        ),
+        geometry
+    );
+    assert_eq!(lock(&toasts).history.len(), 3);
 }
 
 #[test]

@@ -85,7 +85,17 @@ impl App {
                     self.notify(format!("theme: {theme}"));
                 }
             }
-            ("mouse", OptionValue::Bool(on)) => self.pending_mouse_capture = Some(*on),
+            ("mouse", OptionValue::Bool(on)) => {
+                self.pending_mouse_capture = Some(*on);
+                if !on {
+                    self.toast_pointer = None;
+                    self.sync_toast_hover();
+                }
+            }
+            ("toast_position", OptionValue::Str(position)) => {
+                self.toast_position =
+                    crate::view::toast::ToastPosition::parse(position).unwrap_or_default();
+            }
             ("editor", OptionValue::Str(editor)) => self.input.set_modeless(editor == "modeless"),
             ("timeoutlen", OptionValue::Int(ms)) => {
                 let ms = u64::try_from(*ms).unwrap_or_default();
@@ -147,6 +157,16 @@ impl App {
     /// it verbatim. A path that looks like an image but fails to load
     /// surfaces the error rather than silently pasting the path.
     pub(crate) fn handle_paste(&mut self, text: &str) {
+        if let Some(panel) = self.approval_panel.as_mut() {
+            panel.paste(text);
+            return;
+        }
+        if self.notifications_overlay.is_some()
+            || self.help_overlay.is_some()
+            || self.todo_list_overlay.is_some()
+        {
+            return;
+        }
         // A copied/dragged image *file* arrives as its path.
         if let Some(path) = crate::image::path_if_image(text) {
             match crate::image::load_path(&path) {
@@ -165,10 +185,6 @@ impl App {
         }
         if let Some(overlay) = self.plugin_overlay.as_mut() {
             overlay.handle_paste(text);
-            return;
-        }
-        if let Some(panel) = self.approval_panel.as_mut() {
-            panel.paste(text);
             return;
         }
         if self.context_menu.is_some()
@@ -663,6 +679,28 @@ impl App {
         match crate::overlay::OverlayWidget::handle_key(overlay, key) {
             crate::overlay::OverlayAction::Close | crate::overlay::OverlayAction::Resolve(_) => {
                 self.help_overlay = None;
+            }
+            crate::overlay::OverlayAction::Stay | crate::overlay::OverlayAction::PropagateKey => {}
+        }
+    }
+
+    /// Review retained notifications without changing the prompt or conversation.
+    pub(crate) fn open_notifications(&mut self) {
+        if let Some(notifications) = &self.toasts {
+            self.notifications_overlay = Some(crate::overlay::NotificationsOverlay::new(
+                notifications.clone(),
+            ));
+        }
+    }
+
+    /// Route history navigation and review actions without reaching the editor.
+    pub(crate) fn dispatch_notifications_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        let Some(overlay) = self.notifications_overlay.as_mut() else {
+            return;
+        };
+        match crate::overlay::OverlayWidget::handle_key(overlay, key) {
+            crate::overlay::OverlayAction::Close | crate::overlay::OverlayAction::Resolve(_) => {
+                self.notifications_overlay = None;
             }
             crate::overlay::OverlayAction::Stay | crate::overlay::OverlayAction::PropagateKey => {}
         }

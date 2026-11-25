@@ -28,6 +28,7 @@ impl App {
             settings_overlay: None,
             session_tree: None,
             help_overlay: None,
+            notifications_overlay: None,
             agents_overlay: None,
             todo_list_overlay: None,
             session_tree_source: None,
@@ -88,7 +89,11 @@ impl App {
             captured_rows: std::collections::BTreeMap::new(),
             last_cursor_style: None,
             session_usage: None,
-            toasts: None,
+            toasts: Some(toast::shared_toasts()),
+            toast_position: crate::view::toast::ToastPosition::default(),
+            toast_hit: None,
+            toast_pointer: None,
+            toast_mouse_down: None,
             dialog_rx: None,
             plugin_refresh_rx: None,
             model_choices_rx: None,
@@ -179,34 +184,42 @@ impl App {
         self.agents.get(self.focus?).map(|n| n.agent.as_str())
     }
 
-    /// Register the shared toast queue. While set, App-internal
-    /// `notify(...)` calls and external sinks holding a clone of
-    /// the same handle push into the toast strip. Without it
-    /// `notify(...)` silently drops the message - toasts are
-    /// decorative, never load-bearing.
+    /// Share the notification state with runtime sinks. Retained messages
+    /// survive transient card expiry and conversation switches.
     pub fn set_toasts(&mut self, toasts: SharedToasts) {
+        if let Some(previous) = &self.toasts {
+            lock(previous).hover(None, Instant::now());
+        }
+        self.toast_hit = None;
+        self.toast_mouse_down = None;
         self.toasts = Some(toasts);
     }
 
-    /// Snapshot live (non-expired) toasts for one frame, dropping
-    /// expired entries in the process. Returns an empty vector when
-    /// no toast queue is registered.
+    /// Snapshot the current card and waiting acknowledgements for one frame.
+    /// Advance an expired card before taking the snapshot. Return an empty
+    /// vector when no toast queue is registered.
     pub(crate) fn live_toasts(&self) -> Vec<Toast> {
         let Some(handle) = &self.toasts else {
             return Vec::new();
         };
         let now = Instant::now();
         let _ = toast::prune_expired(handle, now);
-        lock(handle).iter().cloned().collect()
+        lock(handle).active.iter().cloned().collect()
     }
 
-    /// Earliest deadline at which a live toast will expire, used by
-    /// the event loop to wake up just in time to repaint without
-    /// waiting for an unrelated key event.
+    /// Notification mutations that need a repaint even without an active summary.
+    pub(crate) fn notification_revision(&self) -> u64 {
+        self.toasts
+            .as_ref()
+            .map_or(0, |state| lock(state).revision())
+    }
+
+    /// Deadline of the current card, used to advance the queue without input.
+    /// Waiting acknowledgements do not start their timers until shown.
     pub(crate) fn next_toast_deadline(&self) -> Option<Instant> {
         let handle = self.toasts.as_ref()?;
         let q = lock(handle);
-        q.iter().map(|t| t.expires_at).min()
+        q.active.front().and_then(Toast::deadline)
     }
 
     /// Ask the engine to cancel the run of the session on screen, with
@@ -695,7 +708,7 @@ impl App {
 
     /// Share the option store with the plugin runtime and apply its
     /// current values: mouse, editor, input bounds and the key sequence
-    /// timeout. Changes queued before this call are covered by those
+    /// timeout and toast placement. Changes queued before this call are covered by those
     /// values and dropped. `setter` routes later sets through the
     /// runtime. The theme reaches the palette through
     /// [`Self::set_highlights`].
@@ -709,10 +722,16 @@ impl App {
         let current: Vec<(&str, Option<OptionValue>)> = {
             let mut store = lock(&self.options);
             store.take_changes();
-            ["mouse", "editor", "input_min_lines", "timeoutlen"]
-                .into_iter()
-                .map(|name| (name, store.get(name).cloned()))
-                .collect()
+            [
+                "mouse",
+                "editor",
+                "input_min_lines",
+                "timeoutlen",
+                "toast_position",
+            ]
+            .into_iter()
+            .map(|name| (name, store.get(name).cloned()))
+            .collect()
         };
         for (name, value) in current {
             if let Some(value) = value {

@@ -17,7 +17,9 @@ read.
   grouped reads, live output from running commands, collapsible
   thinking, inline approvals, search, mouse selection, and a transcript
   printed when you quit. Modeless by default, with a vim mode if you
-  want one.
+  want one. Compact outlined notifications appear one at a time, with
+  configurable placement, a compact unread-alert badge in the footer, and
+  full details in `/notifications`.
 - **Agents.** The model can hand work to child agents that run in
   parallel, or many at once with one `swarm` call. Each one shows up
   as a live card, a pinned row above the prompt, and a full view you

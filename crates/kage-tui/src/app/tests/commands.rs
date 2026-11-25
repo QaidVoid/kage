@@ -364,12 +364,11 @@ fn permission_switches_an_agent_mode_on_an_external_session() {
     let result = app.run_command_validated("permission bogus", &registry);
     assert!(matches!(result, CommandResult::Done(None)), "{result:?}");
     assert!(rx_idle(&rx), "an unknown agent mode sends nothing");
-    assert!(
-        last_block_text(&app.buffer)
-            .contains("permission: no mode `bogus`; this agent offers: code, ask, plan"),
-        "the unknown mode lists the agent's choices, not the engine's: {}",
-        last_block_text(&app.buffer)
+    assert_error_notification(
+        &app,
+        "permission: no mode `bogus`; this agent offers: code, ask, plan",
     );
+    assert!(lock(&app.buffer).blocks().is_empty());
 
     let _ = app.run_command_validated("permission", &registry);
     assert_eq!(
@@ -789,12 +788,8 @@ fn login_command_errors_without_a_runner() {
     let result = app.run_command_validated("login", &registry);
     assert!(matches!(result, CommandResult::Done(None)));
     assert_eq!(app.pending_login, None, "no flow queued without a runner");
-    let buf = buffer.lock().unwrap();
-    let rendered = match buf.blocks().last().map(Arc::as_ref) {
-        Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
-        other => panic!("expected a custom block, got {other:?}"),
-    };
-    assert!(rendered.contains("login: unavailable"), "{rendered}");
+    assert_error_notification(&app, "login: unavailable");
+    assert!(lock(&buffer).blocks().is_empty());
 }
 
 #[test]

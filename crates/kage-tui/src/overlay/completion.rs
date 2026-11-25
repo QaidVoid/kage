@@ -237,7 +237,8 @@ fn popup_area(regions: Regions, total: usize, selected: usize) -> Option<Rect> {
     let above = offset;
     let below = total.saturating_sub(offset + window);
     let rows = window + usize::from(above > 0) + usize::from(below > 0);
-    let space_above = regions.input.y.saturating_sub(regions.buffer.y);
+    let anchor = regions.input.y;
+    let space_above = anchor.saturating_sub(regions.buffer.y);
     let rows = rows.min(usize::from(space_above));
     if rows == 0 {
         return None;
@@ -245,7 +246,7 @@ fn popup_area(regions: Regions, total: usize, selected: usize) -> Option<Rect> {
     let height = u16::try_from(rows).unwrap_or(u16::MAX);
     Some(Rect {
         x: regions.input.x,
-        y: regions.input.y.saturating_sub(height),
+        y: anchor.saturating_sub(height),
         width: regions.input.width,
         height,
     })

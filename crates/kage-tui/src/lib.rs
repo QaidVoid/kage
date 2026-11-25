@@ -44,7 +44,7 @@ pub use events::{
     SharedBuffer, ToolDurations, apply_loop_event, populate_from_history, shared_buffer,
     tool_durations,
 };
-pub use hostlog::buffer_host_log;
+pub use hostlog::notification_host_log;
 pub use input::{HISTORY_MAX, InputAction, InputState, Mode, Pane};
 pub use layout::{
     Heights, INPUT_CHROME_LINES, INPUT_CONTENT_MAX_LINES, INPUT_CONTENT_MIN_LINES, INPUT_MAX_LINES,

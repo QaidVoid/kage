@@ -738,6 +738,8 @@ pub struct App {
     /// Open `?` / `:help` keyboard reference, a modal sibling of the
     /// picker. Scroll-only; every key either scrolls or closes.
     help_overlay: Option<crate::overlay::HelpOverlay>,
+    /// Session-local notification history, independent of the active conversation.
+    notifications_overlay: Option<crate::overlay::NotificationsOverlay>,
     /// Open agents overlay (`Ctrl+T`, `/agents`), a modal sibling of
     /// the picker. Its rows are rebuilt from [`Self::agents`] every
     /// frame.
@@ -992,13 +994,17 @@ pub struct App {
     /// the working row read it. Updated by the host worker thread
     /// after every turn.
     session_usage: Option<crate::usage::SharedSessionUsage>,
-    /// Shared queue of ephemeral toast notifications painted in rows
-    /// of their own below the conversation buffer. The handle is
-    /// cloned to whatever sinks need to push (the App's own
-    /// `notify`, the host log sink for plugin `kage.notify`, etc.).
-    /// When `None`, `notify(...)` is a silent no-op: toasts are
-    /// decorative and never load-bearing.
+    /// Session-local notification history and transient acknowledgements,
+    /// shared with runtime sinks and retained across conversation switches.
     toasts: Option<SharedToasts>,
+    /// Corner used for transient notification cards.
+    toast_position: crate::view::toast::ToastPosition,
+    /// Last painted card geometry and stable acknowledgement identity.
+    toast_hit: Option<crate::view::toast::ToastHit>,
+    /// Last pointer location, used to pause the card under it.
+    toast_pointer: Option<ratatui::layout::Position>,
+    /// Card that received the press of a pending dismissal gesture.
+    toast_mouse_down: Option<u64>,
     /// Channel the worker pushes blocking [`PluginDialog`] requests
     /// onto (`kage.ui.select`). Drained between event polls; while a
     /// dialog is open the worker thread is parked awaiting the answer.

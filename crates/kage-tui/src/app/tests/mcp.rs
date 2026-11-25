@@ -349,7 +349,8 @@ fn logging_in_to_an_mcp_server_queues_the_flow() {
     let registry = app.command_registry();
     let _ = app.run_command_validated("mcp login broken", &registry);
     assert_eq!(app.pending_login, None, "no flow queued without a runner");
-    assert!(last_block_text(&app.buffer).contains("mcp login: unavailable"));
+    assert_error_notification(&app, "mcp login: unavailable");
+    assert!(lock(&app.buffer).blocks().is_empty());
 
     app.set_mcp_login_runner(std::sync::Arc::new(|_| Ok(())));
     let _ = app.run_command_validated("mcp", &registry);
@@ -387,7 +388,8 @@ fn a_finished_mcp_login_restarts_the_server() {
 
     app.run_login_flow(crate::app::PendingLogin::Mcp("broken".to_owned()));
     assert!(rx_idle(&rx), "a failed login restarts nothing");
-    assert!(last_block_text(&app.buffer).contains("mcp login broken: authorization discovery"));
+    assert_error_notification(&app, "mcp login broken: authorization discovery");
+    assert!(lock(&app.buffer).blocks().is_empty());
     assert_eq!(*asked.lock().unwrap(), ["linear", "broken"]);
 }
 

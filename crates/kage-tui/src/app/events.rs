@@ -280,6 +280,7 @@ impl App {
             || self.cmdline.is_some()
             || self.search_line.is_some()
             || self.help_overlay.is_some()
+            || self.notifications_overlay.is_some()
             || self.todo_list_overlay.is_some()
             || self.approval_panel.is_some()
     }
@@ -294,6 +295,12 @@ impl App {
     /// gesture.
     pub(crate) fn handle_mouse_event(&mut self, mouse: ratatui::crossterm::event::MouseEvent) {
         use ratatui::crossterm::event::MouseButton;
+        self.toast_pointer = Some(ratatui::layout::Position::new(mouse.column, mouse.row));
+        self.sync_toast_hover();
+        if self.modal_open() {
+            self.toast_mouse_down = None;
+            self.mouse_drag_anchor = None;
+        }
         // The agents overlay scrolls with the wheel; nothing else under
         // it sees the mouse.
         if let Some(overlay) = self.agents_overlay.as_mut() {
@@ -305,6 +312,9 @@ impl App {
             return;
         }
         if self.context_menu.is_none() && self.modal_open() {
+            return;
+        }
+        if self.context_menu.is_none() && self.handle_toast_mouse(mouse) {
             return;
         }
         match mouse.kind {
@@ -332,6 +342,58 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) => self.mouse_up(mouse.row),
             _ => {}
         }
+    }
+
+    /// Pause only the visible card under the pointer, resuming hidden cards.
+    pub(crate) fn sync_toast_hover(&self) {
+        let hovered = if self.modal_open()
+            || self.context_menu.is_some()
+            || self.input_completion.is_some()
+        {
+            None
+        } else {
+            self.toast_hit.as_ref().and_then(|hit| {
+                self.toast_pointer
+                    .filter(|pointer| hit.area.contains(*pointer))
+                    .map(|_| hit.toast_id)
+            })
+        };
+        if let Some(handle) = &self.toasts {
+            lock(handle).hover(hovered, Instant::now());
+        }
+    }
+
+    /// Keep card gestures from selecting, folding, or scrolling obscured content.
+    fn handle_toast_mouse(&mut self, mouse: ratatui::crossterm::event::MouseEvent) -> bool {
+        use ratatui::crossterm::event::MouseButton;
+        let pointer = ratatui::layout::Position::new(mouse.column, mouse.row);
+        let hit = self
+            .toast_hit
+            .as_ref()
+            .filter(|hit| hit.area.contains(pointer));
+        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+            && let Some(pressed) = self.toast_mouse_down.take()
+        {
+            if hit.is_some_and(|hit| hit.toast_id == pressed)
+                && let Some(handle) = &self.toasts
+            {
+                lock(handle).dismiss(pressed);
+            }
+            return true;
+        }
+        if self.toast_mouse_down.is_some() {
+            return true;
+        }
+        if self.mouse_drag_anchor.is_some() {
+            return false;
+        }
+        let Some(hit) = hit else {
+            return false;
+        };
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            self.toast_mouse_down = Some(hit.toast_id);
+        }
+        true
     }
 
     /// Mouse left-button press: anchor a virtual-row selection at

@@ -435,12 +435,8 @@ mod tests {
             );
             std::fs::create_dir_all(root.join("config/kage")).unwrap();
             std::fs::write(root.join("config/kage/config.toml"), "[invalid").unwrap();
-            let buffer = kage_tui::events::shared_buffer();
-            let sink = kage_tui::hostlog::buffer_host_log(
-                buffer.clone(),
-                kage_tui::toast::shared_toasts(),
-                Arc::default(),
-            );
+            let toasts = kage_tui::toast::shared_toasts();
+            let sink = kage_tui::hostlog::notification_host_log(toasts.clone());
             let mut config = super::merged_config(&root, None, &sink);
             assert!(config.servers.is_empty());
             config.servers.insert("both".into(), stdio("configured"));
@@ -450,19 +446,15 @@ mod tests {
                 &sink,
             );
             assert!(super::sampling_handler(&root, &Environment::inherit(), &sink).is_none());
-            let buffer = kage_core::sync::lock(&buffer);
-            let logs: Vec<_> = buffer
-                .blocks()
-                .iter()
-                .map(|block| match block.as_ref() {
-                    kage_tui::buffer::Block::Custom { text, .. } => text.as_str(),
-                    other => panic!("unexpected block: {other:?}"),
-                })
-                .collect();
+            let notifications = kage_core::sync::lock(&toasts);
+            let logs = &notifications.history;
             assert_eq!(logs.len(), 3, "{logs:?}");
-            assert!(logs[0].contains("[Warn] mcp:"));
-            assert!(logs[1].contains("[Warn] mcp `both`:"));
-            assert!(logs[2].contains("mcp sampling:"));
+            assert_eq!(logs[0].kind, kage_tui::toast::ToastKind::Warning);
+            assert!(logs[0].text.starts_with("mcp:"));
+            assert_eq!(logs[1].kind, kage_tui::toast::ToastKind::Warning);
+            assert!(logs[1].text.starts_with("mcp `both`:"));
+            assert_eq!(logs[2].kind, kage_tui::toast::ToastKind::Error);
+            assert!(logs[2].text.starts_with("mcp sampling:"));
             Ok(())
         });
     }

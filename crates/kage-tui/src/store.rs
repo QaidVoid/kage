@@ -33,6 +33,7 @@ use crate::events::{
     SharedBuffer, compaction_text, produced_media_label, provider_retry_text, push_user_text,
     shared_buffer,
 };
+use crate::toast::{DEFAULT_TOAST_DURATION, SharedToasts, Toast, ToastKind, push_toast};
 use crate::view::tool_view::ToolPhase;
 
 /// The TUI's mirror of one ACP connection: the client's state, plus
@@ -40,6 +41,7 @@ use crate::view::tool_view::ToolPhase;
 #[derive(Debug, Default)]
 pub struct Store {
     client: Client,
+    notifications: SharedToasts,
     buffers: BTreeMap<String, SharedBuffer>,
     /// The keymap the attached `_kage/ui` builds into. Kept between
     /// rebuilds so its generation keeps rising and readers that cache
@@ -54,18 +56,44 @@ impl Store {
         Self::default()
     }
 
+    /// Replace the shared notification state with the application's handle.
+    /// Transient host notices are recorded there instead of in the conversation.
+    pub fn set_notifications(&mut self, notifications: SharedToasts) {
+        self.notifications = notifications;
+    }
+
     /// Handles one incoming frame: the client mirrors the agent into
     /// its state, and a `session/update` folds into its session's
     /// buffer, which a replaced session gets fresh. Only a session
     /// shown through [`Self::shared_buffer`] or [`Self::reset_session`]
     /// has a buffer; the updates of any other, such as a subagent whose
-    /// view the App builds itself, fold nowhere. Reports what moved.
+    /// view the App builds itself, fold nowhere. Transient notices only
+    /// enter shared notifications and leave client state untouched.
+    /// Reports what moved.
     pub fn absorb(&mut self, frame: Frame) -> Vec<Change> {
         if let Frame::Notification { method, params } = &frame
             && method == "session/update"
             && let Ok(note) = serde_json::from_value::<SessionNotification>(params.clone())
-            && self.buffers.contains_key(&note.session_id)
         {
+            if let SessionUpdate::Notice(notice) = &note.update
+                && notice.transient
+            {
+                let kind = match notice.tone {
+                    NoticeTone::Info => ToastKind::Info,
+                    NoticeTone::Warn => ToastKind::Warning,
+                    NoticeTone::Error => ToastKind::Error,
+                    NoticeTone::Success => ToastKind::Success,
+                };
+                push_toast(
+                    &self.notifications,
+                    Toast::with_kind(&notice.text, kind, DEFAULT_TOAST_DURATION)
+                        .with_source("host"),
+                );
+                return Vec::new();
+            }
+            if !self.buffers.contains_key(&note.session_id) {
+                return self.client.handle(frame);
+            }
             if matches!(note.update, SessionUpdate::SessionReplaced(_)) {
                 self.reset_session(&note.session_id);
             } else {
@@ -540,6 +568,91 @@ mod tests {
                 Block::Custom { kind, .. } => kind.clone(),
             })
             .collect()
+    }
+
+    #[test]
+    fn transient_host_notices_only_enter_shared_notifications() {
+        for (tone, kind) in [
+            ("info", ToastKind::Info),
+            ("warn", ToastKind::Warning),
+            ("error", ToastKind::Error),
+            ("success", ToastKind::Success),
+        ] {
+            for shown in [false, true] {
+                let mut store = Store::new();
+                let notifications = crate::toast::shared_toasts();
+                store.set_notifications(notifications.clone());
+                let buffer = shown.then(|| store.shared_buffer("s1"));
+                store.absorb(update(
+                    "s1",
+                    "agent_message_chunk",
+                    &json!({"content": {"type": "text", "text": "keep output"}}),
+                ));
+                let before = store.state().clone();
+                let text = format!("{}\ncomplete second line", "message ".repeat(100));
+                let changes = store.absorb(update(
+                    "s1",
+                    "_kage/notice",
+                    &json!({"tone": tone, "text": text, "transient": true}),
+                ));
+                assert!(changes.is_empty());
+                assert_eq!(store.state(), &before);
+                assert!(
+                    !store
+                        .state()
+                        .session("s1")
+                        .unwrap()
+                        .items
+                        .iter()
+                        .any(|item| matches!(item, kage_client::TranscriptItem::Notice { .. }))
+                );
+                if let Some(buffer) = buffer {
+                    let buffer = lock(&buffer);
+                    assert_eq!(kinds(&buffer), ["assistant"]);
+                    assert!(
+                        matches!(buffer.blocks()[0].as_ref(), Block::Assistant { text, .. } if text == "keep output")
+                    );
+                } else {
+                    assert!(store.buffers.is_empty());
+                }
+                let state = lock(&notifications);
+                assert_eq!(state.history.len(), 1);
+                let notification = &state.history[0];
+                assert_eq!(notification.text, text);
+                assert_eq!(notification.kind, kind);
+                assert_eq!(notification.source, "host");
+                assert_eq!(notification.count, 1);
+                assert_eq!(state.active.len(), 1);
+                assert_eq!(state.active[0].text, text);
+                assert_eq!(state.active[0].kind, kind);
+                assert_eq!(state.active[0].source, "host");
+            }
+        }
+    }
+
+    #[test]
+    fn contextual_notices_remain_inline_without_notifications() {
+        for transient in [None, Some(false)] {
+            for (tone, block_kind) in [("info", "kage:notify"), ("error", "kage:error")] {
+                let mut store = shown("s1");
+                let notifications = crate::toast::shared_toasts();
+                store.set_notifications(notifications.clone());
+                let mut fields = json!({"tone": tone, "text": "contextual detail"});
+                if let Some(transient) = transient {
+                    fields["transient"] = json!(transient);
+                }
+                store.absorb(update("s1", "_kage/notice", &fields));
+                let buffer = store.shared_buffer("s1");
+                assert_eq!(kinds(&lock(&buffer)), [block_kind]);
+                assert!(matches!(
+                    store.state().session("s1").unwrap().items.as_slice(),
+                    [kage_client::TranscriptItem::Notice { text, .. }] if text == "contextual detail"
+                ));
+                let state = lock(&notifications);
+                assert!(state.history.is_empty());
+                assert!(state.active.is_empty());
+            }
+        }
     }
 
     #[test]

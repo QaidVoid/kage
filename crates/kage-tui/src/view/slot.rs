@@ -129,7 +129,7 @@ pub(super) fn render_header(frame: &mut Frame, area: Rect, src: &Sources<'_>) {
         hint: text,
     };
     let spec = src.status.slots.get(SlotName::Header);
-    paint_row(frame, area, &spec, src, &styles);
+    paint_row(frame, area, &spec, src, &styles, None);
 }
 
 /// Paint the activity slot, the working row, into `area`.
@@ -141,7 +141,7 @@ pub(super) fn render_activity(frame: &mut Frame, area: Rect, src: &Sources<'_>) 
     let mut styles = Styles::uniform(text);
     styles.hint = Style::default().fg(theme.input_hint_fg);
     let spec = src.status.slots.get(SlotName::Activity);
-    paint_row(frame, area, &spec, src, &styles);
+    paint_row(frame, area, &spec, src, &styles, None);
 }
 
 /// Paint the footer slot into `area`, its spec's rows top to bottom.
@@ -164,9 +164,10 @@ pub(super) fn render_footer_below(frame: &mut Frame, area: Rect, src: &Sources<'
         hint: Style::default().fg(theme.input_hint_fg),
     };
     let spec = src.status.slots.get(SlotName::Footer);
+    let mut badge = footer_badge(src.status);
     if spec.rows.is_empty() {
         if skip == 0 {
-            paint_row(frame, area, &spec, src, &styles);
+            paint_row(frame, area, &spec, src, &styles, badge);
         }
         return;
     }
@@ -174,6 +175,7 @@ pub(super) fn render_footer_below(frame: &mut Frame, area: Rect, src: &Sources<'
         area.height
             .saturating_sub(u16::try_from(skip).unwrap_or(u16::MAX)),
     );
+    let end = spec.rows.len().min(skip.saturating_add(room));
     for (i, row) in spec.rows.iter().enumerate().skip(skip).take(room) {
         paint_row(
             frame,
@@ -185,8 +187,27 @@ pub(super) fn render_footer_below(frame: &mut Frame, area: Rect, src: &Sources<'
             row,
             src,
             &styles,
+            if i + 1 == end { badge.take() } else { None },
         );
     }
+}
+
+fn footer_badge(status: &StatusCtx<'_>) -> Option<Span<'static>> {
+    let count = status.unread_notifications;
+    if count == 0 {
+        return None;
+    }
+    let theme = crate::theme::current();
+    let color = if status.unread_errors {
+        theme.tool_error_fg
+    } else {
+        theme.warning_fg
+    };
+    let label = if count == 1 { "alert" } else { "alerts" };
+    Some(Span::styled(
+        format!("{count} {label}"),
+        Style::default().fg(color),
+    ))
 }
 
 /// The input pill as the spans of the top rule's left and right
@@ -524,7 +545,14 @@ fn push_notices(
     out.push((Keep::Always, Line::default()));
 }
 
-fn paint_row(frame: &mut Frame, area: Rect, spec: &SlotSpec, src: &Sources<'_>, styles: &Styles) {
+fn paint_row(
+    frame: &mut Frame,
+    area: Rect,
+    spec: &SlotSpec,
+    src: &Sources<'_>,
+    styles: &Styles,
+    badge: Option<Span<'static>>,
+) {
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -538,7 +566,18 @@ fn paint_row(frame: &mut Frame, area: Rect, spec: &SlotSpec, src: &Sources<'_>, 
         0 => width,
         w => width.saturating_sub(w + 2),
     };
-    let mut spans = clip_spans(left, left_budget);
+    let mut spans = match badge.filter(|badge| badge.width() <= left_budget) {
+        Some(badge) => {
+            let left = clip_spans(left, left_budget.saturating_sub(badge.width() + 1));
+            let mut spans = vec![badge];
+            if left.iter().any(|span| span.width() > 0) {
+                spans.push(Span::styled(" ", styles.pad));
+                spans.extend(left);
+            }
+            spans
+        }
+        None => clip_spans(left, left_budget),
+    };
     let used: usize = spans.iter().map(Span::width).sum::<usize>() + right_width;
     let pad = usize::from(area.width).saturating_sub(used);
     if pad > 0 {

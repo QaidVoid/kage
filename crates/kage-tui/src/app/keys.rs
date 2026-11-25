@@ -216,6 +216,11 @@ impl App {
             return self.dispatch_session_tree_key(key);
         }
 
+        if self.notifications_overlay.is_some() {
+            self.dispatch_notifications_key(key);
+            return None;
+        }
+
         // The help reference is a scroll-only modal sibling: any key
         // it does not scroll with closes it.
         if self.help_overlay.is_some() {

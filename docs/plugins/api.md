@@ -84,14 +84,13 @@ missing function.
 
 Record a structured log line. `level` is one of `"trace"`, `"debug"`,
 `"info"`, `"warn"`, `"error"`. An unrecognized level falls back to
-`"info"`, unlike `kage.ui.notify`, which raises. In the TUI the line
-also shows in the conversation, in order with the turn that logged
-it. Lines logged while kage starts show as `kage:log` blocks instead.
-Plugin loading and background diagnostics from the TUI's private host,
-including provider reloads after login, use the same UI log path rather
-than writing over the terminal. Notifications remain transient toasts.
-Standalone `kage rpc` and command-line runs log to stderr, separately
-from their protocol or response output.
+`"info"`, unlike `kage.ui.notify`, which raises. In the TUI, logs enter
+`/notifications` rather than the conversation. Trace and debug entries
+are retained silently. Other levels can show a short floating toast.
+Startup, plugin loading, and background diagnostics use the same path,
+including the TUI's private host. Repeated messages are grouped without
+repeated transcript entries. Standalone `kage rpc` and command-line runs
+log to stderr, separately from their protocol or response output.
 
 ### `kage.sleep_ms(ms: integer)`
 
@@ -145,10 +144,13 @@ user granted this plugin. See [capabilities](/plugins/capabilities).
 
 ### `kage.ui.notify(message: string, level?: string)`
 
-Show a transient toast in the TUI (stderr in print mode). `level` is
-`"info"` (default), `"warning"`, or `"error"`. Other levels are also
-recorded through the log sink so the severity is not lost. An
-unrecognized level raises an error.
+Show a floating toast in the TUI and retain the full message in
+`/notifications` (stderr in print mode). `level` is `"info"`
+(default), `"warning"` (`"warn"` also works), or `"error"`. Severity is
+preserved through one delivery, without a duplicate log or conversation
+entry. An unrecognized level raises an error. See
+[notification history](/guide/commands#notifications) for review and
+repeat handling.
 
 `kage.notify(message, level?)` is an alias for the same function.
 
@@ -202,7 +204,9 @@ width changes, and paints the first line it returns in place of the
 built-in row. Passing `nil` restores the default row. The header row
 collapses while `fn` returns nothing. The `:` command line and `/`
 search line paint over the footer row, custom or not, while they are
-open. Both are shorthands for [`kage.ui.set_slot`](#kage-ui-set-slot-name-spec-nil).
+open. A compact unread-alert badge shares the last available footer row when
+space permits, including custom footers, without adding a row. Both are
+shorthands for [`kage.ui.set_slot`](#kage-ui-set-slot-name-spec-nil).
 
 `fn(width)` returns one of: a plain string (one unstyled span), a
 span table, or an array of those, one line per element. An element

@@ -22,6 +22,7 @@ mod dialogs;
 mod edits;
 mod mcp;
 mod mouse;
+mod notifications;
 mod pickers;
 mod plugins;
 mod prompts;
@@ -106,6 +107,25 @@ fn last_block_text(buffer: &SharedBuffer) -> String {
         Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
         other => panic!("expected a custom block, got {other:?}"),
     }
+}
+
+fn last_notification(app: &App) -> crate::toast::Notification {
+    lock(
+        app.toasts
+            .as_ref()
+            .expect("notification state is available"),
+    )
+    .history
+    .back()
+    .expect("notification recorded")
+    .clone()
+}
+
+fn assert_error_notification(app: &App, expected: &str) {
+    let notification = last_notification(app);
+    assert_eq!(notification.kind, crate::toast::ToastKind::Error);
+    assert!(notification.text.contains(expected), "{notification:?}");
+    assert!(!notification.reviewed);
 }
 
 fn envelope(

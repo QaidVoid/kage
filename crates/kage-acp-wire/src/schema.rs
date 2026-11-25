@@ -2941,11 +2941,14 @@ pub enum NoticeTone {
     Success,
 }
 
-/// A `_kage/notice` update: a message for the user that is not part
-/// of the conversation.
+/// A `_kage/notice` update: a contextual message or transient notification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoticeUpdate {
+    /// Whether the message belongs in notifications rather than the conversation.
+    /// Defaults to false when absent, preserving contextual notice behavior.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transient: bool,
     /// Severity.
     pub tone: NoticeTone,
     /// Message text.
@@ -4439,6 +4442,7 @@ mod tests {
         ] {
             roundtrip(
                 &SessionUpdate::Notice(NoticeUpdate {
+                    transient: false,
                     tone,
                     text: "heads up".into(),
                 }),
@@ -4449,6 +4453,23 @@ mod tests {
                 }),
             );
         }
+    }
+
+    #[test]
+    fn transient_notice_update_roundtrips() {
+        roundtrip(
+            &SessionUpdate::Notice(NoticeUpdate {
+                transient: true,
+                tone: NoticeTone::Warn,
+                text: "heads up".into(),
+            }),
+            serde_json::json!({
+                "sessionUpdate": "_kage/notice",
+                "transient": true,
+                "tone": "warn",
+                "text": "heads up"
+            }),
+        );
     }
 
     #[test]

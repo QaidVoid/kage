@@ -12,6 +12,12 @@ settings, so anything set there wins. The `[ui]`, `[loop]` and `[agents]` keys
 that are options and the `[keybindings]` table feed the same settings `init.lua` sets.
 See [lua config](/guide/lua-config).
 
+In the TUI, configuration and plugin diagnostics appear in the notification
+history, with floating toast cards instead of repeated conversation messages.
+`/notifications` retains full messages and groups repeats, including diagnostics
+raised while files reload.
+See [notifications](/guide/commands#notifications).
+
 Keys are grouped into tables:
 
 ```toml
@@ -31,6 +37,9 @@ theme = "default"
 mouse = true
 # prompt editing style: "modeless" or "vim".
 editor = "modeless"
+# corner for floating notification cards: "bottom-right", "bottom-left",
+# "top-right", or "top-left".
+toast_position = "bottom-right"
 # input box sizing (content rows, not counting its two rules).
 # the box grows with what you type, from input_min_lines up to
 # input_max_lines, then scrolls internally. raise the max for a

@@ -220,6 +220,8 @@ impl App {
             Some(s)
         } else if let Some(t) = &self.session_tree {
             Some(t)
+        } else if let Some(n) = &self.notifications_overlay {
+            Some(n)
         } else if let Some(h) = &self.help_overlay {
             Some(h)
         } else if let Some(t) = &self.todo_list_overlay {

@@ -467,8 +467,12 @@ impl Bridge {
                     SessionUpdate::SessionInfoUpdate(update),
                 );
             }
-            Event::Host(HostEvent::Notice { level, text, .. }) => {
-                let update = notice_update(*level, text.clone());
+            Event::Host(HostEvent::Notice {
+                level,
+                text,
+                transient,
+            }) => {
+                let update = notice_update(*level, text.clone(), *transient);
                 self.send(session, &client_id, update);
             }
             Event::Host(HostEvent::McpServers { servers })
@@ -1574,14 +1578,14 @@ pub(super) fn to_update(
             } else {
                 format!("{wait_secs}s")
             };
-            Some(notice_update(
-                NoticeLevel::Info,
-                format!(
-                    "provider error ({error}); retrying {attempt}/{max_attempts} in {wait_text}"
-                ),
-            ))
+            let text = format!(
+                "provider error ({error}); retrying {attempt}/{max_attempts} in {wait_text}"
+            );
+            Some(notice_update(NoticeLevel::Info, text, false))
         }
-        LoopEvent::Error { kind } => Some(notice_update(NoticeLevel::Error, kind.to_string())),
+        LoopEvent::Error { kind } => {
+            Some(notice_update(NoticeLevel::Error, kind.to_string(), false))
+        }
         _ => None,
     }
 }
@@ -1781,7 +1785,7 @@ fn todo_plan_entry(todo: &serde_json::Value) -> serde_json::Value {
 
 /// The `_kage/notice` carrying an engine notice, with its tone from
 /// the notice level.
-pub(super) fn notice_update(level: NoticeLevel, text: String) -> SessionUpdate {
+pub(super) fn notice_update(level: NoticeLevel, text: String, transient: bool) -> SessionUpdate {
     SessionUpdate::Notice(NoticeUpdate {
         tone: match level {
             NoticeLevel::Info => NoticeTone::Info,
@@ -1790,6 +1794,7 @@ pub(super) fn notice_update(level: NoticeLevel, text: String) -> SessionUpdate {
             NoticeLevel::Error => NoticeTone::Error,
         },
         text,
+        transient,
     })
 }
 
@@ -1918,6 +1923,113 @@ fn media_block(kind: kage_core::Modality, mime: &str, data: &str) -> ContentBloc
 mod tests {
     use super::*;
     use kage_core::agent_report::AgentReport;
+
+    fn held_bridge() -> (crate::engine::Engine, Bridge, SessionId) {
+        let engine = crate::engine::Engine::start(Arc::default());
+        let commander = engine.commander();
+        let (peer, _, _) = kage_jsonrpc::connect(std::io::empty(), std::io::sink());
+        let session = SessionId::new();
+        let bridge = Bridge {
+            peer: peer.into(),
+            live: Arc::new(Mutex::new(Live::new(commander.clone()))),
+            commander,
+            connection: 0,
+            ids: Arc::default(),
+            waiters: Waiters::default(),
+            deferred: Deferred::default(),
+            models: Arc::default(),
+            shown: ShownBySession::default(),
+            aliases: Arc::default(),
+            seen: HashMap::new(),
+            attempts: HashMap::new(),
+            attempt_output: Arc::default(),
+            stops: HashMap::new(),
+            tree: AgentTree::default(),
+            subagents: Arc::default(),
+            kage_client: Arc::default(),
+            history_window: Arc::default(),
+            streaming: HashSet::new(),
+            ended: HashMap::new(),
+            commands: HashMap::new(),
+            modes: HashMap::new(),
+            names: HashMap::new(),
+            statuses: HashMap::new(),
+            fills: HashMap::new(),
+            pruned_cost: HashMap::new(),
+            compacting: HashMap::new(),
+            compacting_started: HashSet::new(),
+            paused: HashSet::new(),
+            held: Held::default(),
+            approving: HashMap::new(),
+            asks: AskSet::default(),
+            seeds: Arc::default(),
+            closed: Arc::default(),
+        };
+        lock(&bridge.ids).insert(session.to_string(), session);
+        lock(&bridge.held).insert(session, HeldUpdates::default());
+        (engine, bridge, session)
+    }
+
+    #[test]
+    fn host_notice_events_forward_transience_and_tone() {
+        let (_engine, mut bridge, session) = held_bridge();
+        for transient in [false, true] {
+            for (level, tone) in [
+                (NoticeLevel::Info, NoticeTone::Info),
+                (NoticeLevel::Warning, NoticeTone::Warn),
+                (NoticeLevel::Error, NoticeTone::Error),
+                (NoticeLevel::Success, NoticeTone::Success),
+            ] {
+                let text = "complete host message\nsecond line".to_owned();
+                bridge.handle(&Envelope {
+                    session,
+                    seq: 0,
+                    event: HostEvent::Notice {
+                        level,
+                        text: text.clone(),
+                        transient,
+                    }
+                    .into(),
+                });
+                let mut held = lock(&bridge.held);
+                let updates = &mut held.get_mut(&session).unwrap().updates;
+                assert_eq!(updates.len(), 1);
+                assert_eq!(
+                    updates.pop().unwrap(),
+                    SessionUpdate::Notice(NoticeUpdate {
+                        tone,
+                        text,
+                        transient,
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn loop_error_and_retry_notices_remain_contextual() {
+        for event in [
+            LoopEvent::Error {
+                kind: LoopError::RateLimited {
+                    message: "busy".into(),
+                    retry_after_secs: None,
+                },
+            },
+            LoopEvent::ProviderRetry {
+                attempt: 1,
+                max_attempts: 3,
+                wait_secs: 0,
+                wait_ms: 250,
+                requested_secs: None,
+                error: "busy".into(),
+            },
+        ] {
+            let Some(SessionUpdate::Notice(notice)) = to_update(&mut HashMap::new(), &event) else {
+                panic!("expected contextual notice");
+            };
+            assert!(!notice.transient);
+        }
+    }
 
     /// One `<agent>` report element with a parseable header.
     fn report(name: &str, session: &str, body: &str) -> String {

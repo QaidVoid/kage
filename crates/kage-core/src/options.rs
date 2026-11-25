@@ -158,6 +158,16 @@ pub const OPTIONS: &[OptionDef] = &[
         live: true,
     },
     OptionDef {
+        name: "toast_position",
+        toml: "ui.toast_position",
+        kind: OptionKind::Choice {
+            values: &["top-left", "top-right", "bottom-left", "bottom-right"],
+            default: "bottom-right",
+        },
+        doc: "Corner for floating notifications. Defaults to bottom-right.",
+        live: true,
+    },
+    OptionDef {
         name: "thinking_level",
         toml: "ui.thinking_level",
         kind: OptionKind::Choice {
@@ -657,6 +667,7 @@ fn config_value(name: &str, config: &Config) -> Option<OptionValue> {
         "input_min_lines" => OptionValue::Int(i64::from(ui.input_min_lines)),
         "input_max_lines" => OptionValue::Int(i64::from(ui.input_max_lines)),
         "transcript_on_exit" => OptionValue::Str(ui.transcript_on_exit.clone()),
+        "toast_position" => OptionValue::Str(ui.toast_position.clone()),
         "thinking_level" => OptionValue::Str(ui.thinking_level.clone().unwrap_or_default()),
         "compaction_threshold" => {
             OptionValue::Float(widen(config.loop_settings.compaction_threshold))
@@ -1110,6 +1121,81 @@ mod tests {
     }
 
     #[test]
+    fn toast_position_defaults_to_bottom_right() {
+        let cfg = load("[ui]\n");
+        assert_eq!(cfg.ui.toast_position, "bottom-right");
+        let (store, errors) = OptionStore::from_config(&cfg);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            store.get("toast_position"),
+            Some(&OptionValue::Str("bottom-right".into()))
+        );
+        assert_eq!(store.source("toast_position"), Some(OptionSource::Default));
+    }
+
+    #[test]
+    fn toast_position_accepts_all_four_corners_from_config_and_live_sets() {
+        let def = find("toast_position").unwrap();
+        assert_eq!(def.toml, "ui.toast_position");
+        assert!(def.live);
+        let mut runtime = OptionStore::default();
+        for corner in ["top-left", "top-right", "bottom-left", "bottom-right"] {
+            let value = OptionValue::Str(corner.into());
+            let cfg = load(&format!("[ui]\ntoast_position = \"{corner}\"\n"));
+            let (mut store, errors) = OptionStore::from_config(&cfg);
+            assert!(errors.is_empty(), "{errors:?}");
+            assert_eq!(store.get(def.name), Some(&value));
+            let source = if corner == "bottom-right" {
+                OptionSource::Default
+            } else {
+                OptionSource::Toml
+            };
+            assert_eq!(store.source(def.name), Some(source));
+            assert!(store.take_changes().is_empty());
+            let change = runtime
+                .set(def.name, value.clone(), OptionSource::Runtime)
+                .unwrap();
+            assert_eq!(change.new, value);
+            assert_eq!(runtime.get(def.name), Some(&value));
+            assert_eq!(runtime.source(def.name), Some(OptionSource::Runtime));
+            assert_eq!(runtime.take_changes(), [change]);
+        }
+    }
+
+    #[test]
+    fn invalid_toast_position_reports_and_keeps_default_source() {
+        for invalid in ["center", "TOP-RIGHT", ""] {
+            let cfg = load(&format!("[ui]\ntoast_position = \"{invalid}\"\n"));
+            assert_eq!(cfg.ui.toast_position, invalid);
+            let (mut store, errors) = OptionStore::from_config(&cfg);
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert!(matches!(
+                errors[0],
+                OptionError::Invalid {
+                    name: "toast_position",
+                    ..
+                }
+            ));
+            assert_eq!(
+                store.get("toast_position"),
+                Some(&OptionValue::Str("bottom-right".into()))
+            );
+            assert_eq!(store.source("toast_position"), Some(OptionSource::Default));
+            let before = store.clone();
+            assert!(
+                store
+                    .set(
+                        "toast_position",
+                        OptionValue::Str(invalid.into()),
+                        OptionSource::Lua,
+                    )
+                    .is_err()
+            );
+            assert_eq!(store, before);
+        }
+    }
+
+    #[test]
     fn set_records_source_and_queues_changes() {
         let mut store = OptionStore::default();
         let change = store
@@ -1204,14 +1290,26 @@ mod tests {
             &path,
             &[
                 (find("mouse").unwrap(), OptionValue::Bool(false)),
+                (
+                    find("toast_position").unwrap(),
+                    OptionValue::Str("top-left".into()),
+                ),
                 (find("agent_max_depth").unwrap(), OptionValue::Int(2)),
             ],
         )
         .unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            "# mine\n[ui]\nmouse = false\n\n[agents]\nmax_depth = 2\n"
+            "# mine\n[ui]\nmouse = false\ntoast_position = \"top-left\"\n\n[agents]\nmax_depth = 2\n"
         );
+        let cfg = load(&std::fs::read_to_string(&path).unwrap());
+        let (store, errors) = OptionStore::from_config(&cfg);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            store.get("toast_position"),
+            Some(&OptionValue::Str("top-left".into()))
+        );
+        assert_eq!(store.source("toast_position"), Some(OptionSource::Toml));
     }
 
     #[test]

@@ -270,6 +270,10 @@ impl App {
                 self.run_goal_command(rest);
                 None
             }
+            "notifications" => {
+                self.open_notifications();
+                None
+            }
             "todo_list" => {
                 self.open_todo_list();
                 None
@@ -586,8 +590,12 @@ impl App {
     }
 
     pub(crate) fn push_error(&mut self, msg: impl Into<String>) {
-        let mut buf = lock(&self.buffer);
-        buf.push_custom("kage:error", msg, false);
+        if let Some(notifications) = &self.toasts {
+            toast::push_toast(
+                notifications,
+                Toast::with_kind(msg, ToastKind::Error, toast::DEFAULT_TOAST_DURATION),
+            );
+        }
     }
 
     /// Push `text` to the system clipboard: the OSC52 escape for the

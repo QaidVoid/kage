@@ -1016,6 +1016,11 @@ pub struct UiConfig {
     /// `none` for only the session path and a resume hint. Validated by
     /// the option registry, which keeps the default for any other value.
     pub transcript_on_exit: String,
+    /// Corner for floating notifications: `top-left`, `top-right`,
+    /// `bottom-left`, or `bottom-right` (the default). Kept as a raw
+    /// string so the option registry can report invalid values and
+    /// fall back to the default without rejecting the configuration.
+    pub toast_position: String,
 }
 
 impl Default for UiConfig {
@@ -1030,6 +1035,7 @@ impl Default for UiConfig {
             input_max_lines: 8,
             thinking_level: None,
             transcript_on_exit: "full".into(),
+            toast_position: "bottom-right".into(),
         }
     }
 }

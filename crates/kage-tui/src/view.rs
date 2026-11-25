@@ -126,6 +126,14 @@ pub struct StatusCtx<'a> {
     /// Placeholder of the empty draft in insert mode and the modeless
     /// editor, in place of the default one.
     pub placeholder: Option<&'a str>,
+    /// Corner of the conversation viewport used for floating toast cards.
+    pub toast_position: toast::ToastPosition,
+    /// Whether a higher-priority interactive surface hides floating cards.
+    pub hide_toasts: bool,
+    /// Number of retained warning and error groups awaiting review.
+    pub unread_notifications: usize,
+    /// Whether unread notification groups include an error.
+    pub unread_errors: bool,
     /// The byte length of the command that opens the draft, slash
     /// included, which the input paints apart from the prompt.
     pub command_end: Option<usize>,
@@ -235,7 +243,7 @@ impl Emphasis {
     }
 }
 
-/// Paint the entire TUI for one frame.
+/// Paint the TUI and return the visible toast card's pointer geometry.
 ///
 /// Takes `buffer` mutably so the renderer can write back the clamped
 /// scroll position. Without this, when `Buffer::scroll` inflates past
@@ -258,7 +266,7 @@ pub fn render(
     captured_rows: &mut std::collections::BTreeMap<usize, Vec<CapturedCell>>,
     session_usage: Option<&SessionUsage>,
     toasts: &[crate::toast::Toast],
-) {
+) -> Option<toast::ToastHit> {
     // Opaque base for the entire frame: header, conversation, input,
     // modeline, every gap and overlay paint over this, so nothing
     // bleeds the terminal background through as a patchwork. A theme
@@ -274,14 +282,6 @@ pub fn render(
     }
     let todos = todo::from_blocks(buffer.blocks());
     let sources = slot::Sources::new(status, session_usage, input, frame.area().width);
-    // Toasts float over the bottom of the conversation and take no
-    // rows of their own, so text never shifts while one is up.
-    let toast_rows = toast::toast_rows(toasts.len(), regions.buffer);
-    let toast_area = Rect {
-        y: regions.buffer.bottom() - toast_rows,
-        height: toast_rows,
-        ..regions.buffer
-    };
     slot::render_header(frame, regions.header, &sources);
     render_buffer(
         frame,
@@ -308,7 +308,6 @@ pub fn render(
     slot::render_activity(frame, activity_area, &sources);
     render_todo_box(frame, todo_area, &todos);
     render_input(frame, regions, input, &sources);
-    render_toasts(frame, toast_area, toasts, &theme);
     if let Some(cl) = cmdline {
         render_cmdline_line(frame, first_footer_row(regions.footer), cl);
         render_cmdline_error(frame, regions, cl);
@@ -331,6 +330,11 @@ pub fn render(
         render_too_small_notice(frame);
     }
     capture_and_overlay(frame, regions, buffer, screen_selection, captured_rows);
+    if status.hide_toasts {
+        None
+    } else {
+        render_toasts(frame, regions.buffer, toasts, &theme, status.toast_position)
+    }
 }
 
 /// One centered line painted when the fixed chrome leaves the
@@ -380,6 +384,7 @@ fn start_area(buffer: &Buffer, area: Rect) -> Option<Rect> {
 /// Row heights of the chrome for one frame: the header and activity
 /// rows collapse while their slots paint nothing, the todo box rides
 /// the activity region's bottom, and the input fits its draft.
+/// Unread attention shares the footer without adding rows.
 #[must_use]
 pub fn chrome_heights(
     status: &StatusCtx<'_>,

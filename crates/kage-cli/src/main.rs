@@ -1927,28 +1927,28 @@ mod tests {
                 "[permissions]\nconfine_paths = false\n",
             )
             .unwrap();
-            let buffer = kage_tui::events::shared_buffer();
-            let sink = kage_tui::hostlog::buffer_host_log(
-                buffer.clone(),
-                kage_tui::toast::shared_toasts(),
-                std::sync::Arc::default(),
-            );
+            let toasts = kage_tui::toast::shared_toasts();
+            let sink = kage_tui::hostlog::notification_host_log(toasts.clone());
             let loaded = load_skills_with_log(&project, None, &sink);
             assert_eq!(loaded.len(), 1);
             assert_eq!(loaded[0].name, "valid");
             crate::trust::warn_if_untrusted_with_log(&project, &sink);
-            let buffer = kage_core::sync::lock(&buffer);
-            assert_eq!(buffer.blocks().len(), 2);
-            assert!(matches!(
-                buffer.blocks()[0].as_ref(),
-                kage_tui::buffer::Block::Custom { kind, text, .. }
-                    if kind == "kage:error" && text.contains("skill load error:")
-            ));
-            assert!(matches!(
-                buffer.blocks()[1].as_ref(),
-                kage_tui::buffer::Block::Custom { text, .. }
-                    if text.contains("[Warn] ignoring untrusted")
-            ));
+            let notifications = kage_core::sync::lock(&toasts);
+            assert_eq!(notifications.history.len(), 2);
+            assert_eq!(
+                notifications.history[0].kind,
+                kage_tui::toast::ToastKind::Error
+            );
+            assert!(notifications.history[0].text.contains("skill load error:"));
+            assert_eq!(
+                notifications.history[1].kind,
+                kage_tui::toast::ToastKind::Warning
+            );
+            assert!(
+                notifications.history[1]
+                    .text
+                    .starts_with("ignoring untrusted")
+            );
             Ok(())
         });
     }

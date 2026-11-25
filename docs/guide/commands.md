@@ -13,14 +13,15 @@ the selection, `tab` or `enter` accepts the highlighted one, and with
 the popup closed `enter` runs the line. A submitted command is kept
 in the prompt history, so `up` recalls it like any other draft.
 
-Invalid input on submit restores the draft and shows the reason as a
+Invalid input on submit restores the draft and shows the reason in a
 toast. For example, `/quut` shows `unknown command: quut (did you
 mean /quit?)`.
 
 Commands that answer with text, such as `/theme list`,
 `/permission` without a mode, `/keybindings` and `/events`, write it
-into the conversation as a block. Errors from a command that ran
-show there too.
+into the conversation as a block. Operational feedback and local errors
+use toasts instead. Failures that explain a turn or tool
+result remain in the conversation.
 
 ::: tip vim mode
 With `editor = "vim"`, the same commands are also available from the
@@ -52,6 +53,7 @@ The table lists every built-in command.
 | `/mcp login <server>`     | Log in to a remote MCP server with OAuth: suspends the TUI, runs the browser login, then reconnects the server |
 | `/settings`               | Open the settings dialog, which lists every option (see [settings](#settings)) |
 | `/help`                   | Open the keyboard reference overlay             |
+| `/notifications`          | Review retained notifications, full diagnostic text, and repeat counts |
 | `/theme list`             | List bundled and user themes, `*` marking the active one |
 | `/theme set <name>`       | Switch to a bundled or user theme for this session |
 | `/theme current`          | Show the active theme name                      |
@@ -65,7 +67,7 @@ The table lists every built-in command.
 | `/undo` | Drop the last exchange: the session branches in place, continuing from just before its last prompt, and the removed prompt goes back into the editor to edit and resend. Earlier turns stay in the file as an abandoned branch, so `/rewind` can still reach them. Refused while a run is in flight |
 | `/rewind` | Open the rewind picker: one row per prompt the session's branch tree holds, oldest first, branches indented one level per rewind, opened on the active head. Picking one keeps that prompt and abandons its reply and everything after it; the session continues from the pick. Same rules as `/undo` |
 | `/keybindings` / `/keys`  | List active key mappings per mode with their owners |
-| `/attach [path]` / `/img` | Attach a png, jpeg, gif or webp image to the next prompt: a file `path`, or the OS clipboard image when no path is given. A toast warns when the model does not accept images. To include a text file, mention it as `@path` in the prompt instead |
+| `/attach [path]` / `/img` | Attach a png, jpeg, gif or webp image to the next prompt: a file `path`, or the OS clipboard image when no path is given. A notification warns when the model does not accept images. To include a text file, mention it as `@path` in the prompt instead |
 | `/mouse [on\|off\|toggle]` | Control terminal mouse capture                |
 | `/fold all`               | Fold every block                                |
 | `/unfold all`             | Unfold every block                              |
@@ -73,8 +75,48 @@ The table lists every built-in command.
 | `/noh`                    | Clear search highlighting                       |
 | `/events`                 | List events plugins can hook with `kage.on`     |
 | `/cancel`                 | Cancel the current turn                         |
-| `/reload`                 | Reload `init.lua` and plugins now, without waiting for a file change. A toast reports the result, and each error shows in the conversation. |
+| `/reload`                 | Reload `init.lua` and plugins now, without waiting for a file change. A toast reports the result. Full diagnostics remain in `/notifications`. |
 | `/quit` / `/q`            | Exit the TUI                                    |
+
+## notifications
+
+Action feedback, plugin messages, and runtime diagnostics appear as compact
+floating cards with a thin rounded outline, a small severity marker, and
+wrapped text. Cards stay inside the conversation viewport, clear of the
+prompt, activity row, and footer, without changing the conversation layout.
+Long messages have a short preview with a `/notifications` hint for the full
+text. Trace and debug logs enter history without interrupting you.
+
+One card is shown at a time. New arrivals wait in order instead of replacing
+the current card, and a small pending count indicates waiting notices. Each
+card gets five seconds when it reaches the front, so waiting does not consume
+its display time. The burst queue is bounded, and overflow remains in history.
+With mouse capture enabled, hovering pauses the current card and clicking it
+dismisses it, moving to the next waiting notice. Dismissal does not mark a
+warning reviewed. Unreviewed warnings and errors leave a compact footer badge,
+such as `2 alerts`, even after their cards expire or are dismissed. The badge
+disappears when all retained issues are reviewed. It shares an existing footer
+row without taking space from the conversation. Cards yield to open menus,
+dialogs, and completion lists.
+
+The default position is bottom-right. Set `[ui] toast_position` in
+`config.toml` to `"bottom-right"`, `"bottom-left"`, `"top-right"`, or
+`"top-left"`. You can also change it live in `/settings` or with
+`kage.opt.toast_position` in `init.lua`.
+
+`/notifications` opens the full wrapped messages, newest first, including
+source, severity, repeat count, and review status. Use `up` / `down` or
+`j` / `k` to scroll, `page up` / `page down` to page, and `home` / `end`
+to jump. Press `r` to mark all retained messages reviewed. `esc` or `q`
+closes the reader without changing your draft. Opening the reader alone
+does not mark messages reviewed or fix the underlying issue.
+
+History keeps the latest 100 message groups in memory for this TUI run,
+across conversation switches and plugin reloads. It is not saved with the
+conversation. Identical messages from the same source and severity merge
+within five seconds. Unreviewed warnings and errors continue merging
+until reviewed, without extending the card lifetime or repeatedly
+interrupting. A warning that occurs again after review can alert again.
 
 ## native and external sessions
 

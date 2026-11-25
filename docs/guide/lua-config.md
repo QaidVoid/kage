@@ -117,6 +117,7 @@ value)` is the same as assigning.
 | `theme_light` | `ui.theme_light` | a bundled or user theme name | `"kage-dawn"` | immediately |
 | `mouse` | `ui.mouse` | boolean | `true` | immediately |
 | `editor` | `ui.editor` | `"vim"` or `"modeless"` | `"modeless"` | immediately |
+| `toast_position` | `ui.toast_position` | `"bottom-right"`, `"bottom-left"`, `"top-right"` or `"top-left"` | `"bottom-right"` | immediately |
 | `input_min_lines` | `ui.input_min_lines` | integer, 1 to 64 | `1` | immediately |
 | `input_max_lines` | `ui.input_max_lines` | integer, 1 to 64 | `8` | immediately |
 | `thinking_level` | `ui.thinking_level` | `""`, `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` or `"ultra"` | `""` | next session |
@@ -517,7 +518,9 @@ right edge. `sep` goes between two items that both have output. When
 a row is too narrow, the right side drops its items from the front.
 A footer row that paints nothing collapses, and one row always stays.
 The `:` command line and the `/` search line paint over the footer's
-top row while they are open.
+top row while they are open. A compact unread-alert badge shares the last
+available footer row when space permits, including custom footers. It does
+not add a row or replace command and search entry.
 
 `start` paints while the conversation holds nothing but notices: no
 prompt, reply, thinking, tool call or shell command yet. Errors such

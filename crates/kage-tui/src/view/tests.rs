@@ -231,7 +231,7 @@ fn paint_frame(
         .draw(|frame| {
             let heights = chrome_heights(status, usage, input, frame.area().width, todos);
             let regions = crate::layout::split(frame.area(), heights);
-            render(
+            let _ = render(
                 frame,
                 regions,
                 buffer,
@@ -901,6 +901,324 @@ fn footer_with_rows(rows: Vec<kage_plugin::SlotSpec>) -> kage_plugin::SlotSpecs 
     slots
 }
 
+fn footer_text(text: &str) -> kage_plugin::SlotItem {
+    kage_plugin::SlotItem::Text(kage_plugin::ChromeSpan {
+        text: text.into(),
+        ..kage_plugin::ChromeSpan::default()
+    })
+}
+
+fn paint_footer(
+    status: &StatusCtx<'_>,
+    usage: Option<&SessionUsage>,
+    width: u16,
+    height: u16,
+    skip: usize,
+) -> ratatui::buffer::Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let src = slot::Sources::new(status, usage, &InputState::new(), width);
+            slot::render_footer_below(frame, frame.area(), &src, skip);
+        })
+        .unwrap();
+    terminal.backend().buffer().clone()
+}
+
+fn footer_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
+    buffer
+        .content()
+        .chunks(usize::from(buffer.area.width))
+        .map(|row| {
+            row.iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn footer_alerts_are_compact_pluralized_and_severity_colored() {
+    let theme = crate::theme::current();
+    let mut status = StatusCtx {
+        slots: footer_with_rows(vec![kage_plugin::SlotSpec {
+            left: vec![footer_text("custom status")],
+            ..kage_plugin::SlotSpec::default()
+        }]),
+        ..StatusCtx::default()
+    };
+    assert_eq!(
+        footer_rows(&paint_footer(&status, None, 40, 1, 0)),
+        ["custom status"]
+    );
+    for (count, errors, label, color) in [
+        (1, false, "1 alert", theme.warning_fg),
+        (3, false, "3 alerts", theme.warning_fg),
+        (2, true, "2 alerts", theme.tool_error_fg),
+    ] {
+        status.unread_notifications = count;
+        status.unread_errors = errors;
+        let buffer = paint_footer(&status, None, 40, 1, 0);
+        assert_eq!(footer_rows(&buffer), [format!("{label} custom status")]);
+        for x in 0..u16::try_from(label.len()).unwrap() {
+            assert_eq!(buffer[(x, 0)].fg, color);
+            assert!(!buffer[(x, 0)].modifier.contains(Modifier::BOLD));
+        }
+    }
+    status.unread_notifications = 0;
+    assert_eq!(
+        footer_rows(&paint_footer(&status, None, 40, 1, 0)),
+        ["custom status"]
+    );
+}
+
+#[test]
+fn footer_alerts_use_only_the_last_painted_row_without_changing_height() {
+    let mut status = StatusCtx {
+        unread_notifications: 4,
+        slots: footer_with_rows(
+            ["first", "second", "third", "fourth", "fifth"]
+                .into_iter()
+                .map(|text| kage_plugin::SlotSpec {
+                    left: vec![footer_text(text)],
+                    ..kage_plugin::SlotSpec::default()
+                })
+                .collect(),
+        ),
+        ..StatusCtx::default()
+    };
+    let height = |status: &StatusCtx<'_>| {
+        slot::footer_height(&slot::Sources::new(status, None, &InputState::new(), 40))
+    };
+    assert_eq!(height(&status), 4);
+    assert_eq!(
+        footer_rows(&paint_footer(&status, None, 40, 2, 0)),
+        ["first", "4 alerts second"]
+    );
+    assert_eq!(
+        footer_rows(&paint_footer(&status, None, 40, 4, 1)),
+        ["", "second", "third", "4 alerts fourth"]
+    );
+    status.unread_notifications = 0;
+    assert_eq!(height(&status), 4);
+}
+
+#[test]
+fn footer_alerts_fit_whole_labels_in_empty_and_narrow_custom_footers() {
+    let mut status = StatusCtx {
+        unread_notifications: 1,
+        slots: footer_with_rows(vec![]),
+        ..StatusCtx::default()
+    };
+    assert_eq!(
+        footer_rows(&paint_footer(&status, None, 7, 1, 0)),
+        ["1 alert"]
+    );
+    assert_eq!(footer_rows(&paint_footer(&status, None, 6, 1, 0)), [""]);
+    assert_eq!(
+        slot::footer_height(&slot::Sources::new(&status, None, &InputState::new(), 40)),
+        1
+    );
+    status.slots = footer_with_rows(vec![kage_plugin::SlotSpec {
+        left: vec![footer_text("abcdefghijk")],
+        ..kage_plugin::SlotSpec::default()
+    }]);
+    assert_eq!(
+        footer_rows(&paint_footer(&status, None, 7, 1, 0)),
+        ["1 alert"]
+    );
+    assert_eq!(
+        footer_rows(&paint_footer(&status, None, 11, 1, 0)),
+        ["1 alert ..."]
+    );
+    assert_eq!(
+        footer_rows(&paint_footer(&status, None, 6, 1, 0)),
+        ["abc..."]
+    );
+}
+
+#[test]
+fn footer_alerts_preserve_custom_right_fields_and_their_fit_decisions() {
+    let right_color = Color::Rgb(0x12, 0x34, 0x56);
+    let mut status = StatusCtx {
+        slots: footer_with_rows(vec![kage_plugin::SlotSpec {
+            left: vec![footer_text("configured left status")],
+            right: vec![
+                kage_plugin::SlotItem::Text(kage_plugin::ChromeSpan {
+                    text: "right first".into(),
+                    fg: Some("#123456".into()),
+                    ..kage_plugin::ChromeSpan::default()
+                }),
+                kage_plugin::SlotItem::Text(kage_plugin::ChromeSpan {
+                    text: "right last".into(),
+                    fg: Some("#123456".into()),
+                    ..kage_plugin::ChromeSpan::default()
+                }),
+            ],
+            sep: " | ".into(),
+            ..kage_plugin::SlotSpec::default()
+        }]),
+        ..StatusCtx::default()
+    };
+    for width in 1..=80 {
+        status.unread_notifications = 0;
+        let plain = paint_footer(&status, None, width, 1, 0);
+        status.unread_notifications = 12;
+        let alerts = paint_footer(&status, None, width, 1, 0);
+        for x in 0..width {
+            if plain[(x, 0)].fg == right_color || alerts[(x, 0)].fg == right_color {
+                assert_eq!(alerts[(x, 0)], plain[(x, 0)], "width {width}, column {x}");
+            }
+        }
+        let row = &footer_rows(&alerts)[0];
+        if row.starts_with("12") {
+            assert!(row.starts_with("12 alerts"), "width {width}: {row:?}");
+        }
+    }
+}
+
+#[test]
+fn footer_alerts_are_independent_of_the_current_toast() {
+    let toast = crate::toast::Toast::info("Saved successfully");
+    for count in [0, 2] {
+        for live in [false, true] {
+            let status = StatusCtx {
+                unread_notifications: count,
+                slots: footer_with_rows(vec![kage_plugin::SlotSpec::default()]),
+                ..StatusCtx::default()
+            };
+            let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+            terminal
+                .draw(|frame| {
+                    let src = slot::Sources::new(&status, None, &InputState::new(), 60);
+                    slot::render_footer(frame, Rect::new(0, 9, 60, 1), &src);
+                    let toasts = if live {
+                        std::slice::from_ref(&toast)
+                    } else {
+                        &[]
+                    };
+                    toast::render_toasts(
+                        frame,
+                        Rect::new(0, 0, 60, 9),
+                        toasts,
+                        &crate::theme::current(),
+                        toast::ToastPosition::BottomRight,
+                    );
+                })
+                .unwrap();
+            let rows = footer_rows(terminal.backend().buffer());
+            assert_eq!(
+                rows.last().unwrap(),
+                if count == 0 { "" } else { "2 alerts" }
+            );
+            assert_eq!(
+                rows.iter().any(|row| row.contains("Saved successfully")),
+                live
+            );
+        }
+    }
+}
+
+#[test]
+fn footer_alerts_do_not_appear_in_the_header_or_activity() {
+    let status = StatusCtx {
+        title: Some("Session title"),
+        activity: Some("Running tests"),
+        unread_notifications: 2,
+        ..StatusCtx::default()
+    };
+    let mut terminal = Terminal::new(TestBackend::new(60, 2)).unwrap();
+    terminal
+        .draw(|frame| {
+            let src = slot::Sources::new(&status, None, &InputState::new(), 60);
+            slot::render_header(frame, Rect::new(0, 0, 60, 1), &src);
+            slot::render_activity(frame, Rect::new(0, 1, 60, 1), &src);
+        })
+        .unwrap();
+    let rows = footer_rows(terminal.backend().buffer());
+    assert!(rows[0].contains("Session title"), "{rows:?}");
+    assert!(rows[1].contains("Running tests"), "{rows:?}");
+    assert!(!rows.iter().any(|row| row.contains("alerts")), "{rows:?}");
+}
+
+#[test]
+fn footer_alerts_leave_default_model_and_context_fields_visible() {
+    let usage = SessionUsage {
+        model: "fake:model".into(),
+        current_context: 24_000,
+        context_window: 200_000,
+        ..SessionUsage::default()
+    };
+    let status = StatusCtx {
+        model: Some("Fake"),
+        unread_notifications: 2,
+        ..StatusCtx::default()
+    };
+    let rows = footer_rows(&paint_footer(&status, Some(&usage), 100, 2, 0));
+    assert!(
+        rows[0].ends_with("Fake \u{b7} 12% ctx (24k/200k)"),
+        "{rows:?}"
+    );
+    assert!(rows[1].starts_with("2 alerts"), "{rows:?}");
+    assert_eq!(rows.iter().filter(|row| row.contains("alerts")).count(), 1);
+}
+
+#[test]
+fn footer_alerts_yield_to_single_command_and_search_rows_but_use_lower_rows() {
+    let command =
+        CommandLine::for_test("quit", crate::cmdparse::Completions::default(), true, None);
+    let search = CommandLine::for_test(
+        "needle",
+        crate::cmdparse::Completions::default(),
+        true,
+        None,
+    );
+    for searching in [false, true] {
+        for multirow in [false, true] {
+            let rows = if multirow {
+                vec!["top", "bottom"]
+            } else {
+                vec!["single"]
+            };
+            let status = StatusCtx {
+                unread_notifications: 2,
+                search_line: searching.then_some(&search),
+                slots: footer_with_rows(
+                    rows.into_iter()
+                        .map(|text| kage_plugin::SlotSpec {
+                            left: vec![footer_text(text)],
+                            ..kage_plugin::SlotSpec::default()
+                        })
+                        .collect(),
+                ),
+                ..StatusCtx::default()
+            };
+            let rows = snapshot_frame(
+                &mut Buffer::new(),
+                &InputState::new(),
+                (!searching).then_some(&command),
+                &status,
+                None,
+                Rect::new(0, 0, 60, 10),
+            );
+            let command_row = rows.len() - if multirow { 2 } else { 1 };
+            assert_eq!(
+                rows[command_row],
+                if searching { "/needle" } else { ":quit" }
+            );
+            assert_eq!(
+                rows.iter().filter(|row| row.contains("alerts")).count(),
+                usize::from(multirow)
+            );
+            if multirow {
+                assert_eq!(rows.last().unwrap(), "2 alerts bottom");
+            }
+        }
+    }
+}
+
 #[test]
 fn the_footer_shows_swarm_and_background_task_segments() {
     let usage = SessionUsage {
@@ -1115,7 +1433,7 @@ fn cell_bg_at(cmdline: &CommandLine, area: Rect, x: u16, y: u16) -> Color {
                 &todo::TodoStrip::default(),
             );
             let regions = crate::layout::split(frame.area(), heights);
-            render(
+            let _ = render(
                 frame,
                 regions,
                 &mut buffer,
@@ -2704,7 +3022,7 @@ fn a_terminal_too_small_for_the_buffer_says_so() {
         std::collections::BTreeMap::new();
     terminal
         .draw(|frame| {
-            render(
+            let _ = render(
                 frame,
                 regions,
                 &mut buffer,

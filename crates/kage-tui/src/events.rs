@@ -1471,7 +1471,7 @@ mod tests {
                             ..crate::layout::Heights::default()
                         },
                     );
-                    crate::view::render(
+                    let _ = crate::view::render(
                         frame,
                         regions,
                         &mut buf,

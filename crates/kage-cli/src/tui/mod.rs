@@ -20,8 +20,8 @@ pub(crate) use kage_plugin::{
 pub(crate) use kage_provider::ProviderRegistry;
 pub(crate) use kage_session::SessionSummary;
 pub(crate) use kage_tui::{
-    App, PickItem, PluginDialog, PluginRefresh, RunRequest, Tui, buffer_host_log, shared_buffer,
-    shared_session_usage, shared_toasts,
+    App, PickItem, PluginDialog, PluginRefresh, RunRequest, Tui, notification_host_log,
+    shared_buffer, shared_session_usage, shared_toasts,
 };
 
 pub(crate) use crate::plugins::setup_user_runtime;

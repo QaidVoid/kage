@@ -164,11 +164,11 @@ fn config_action_binding_wins_over_builtin_handler() {
 }
 
 #[test]
-fn a_bad_mapped_command_reports_inline() {
+fn a_bad_mapped_command_records_an_error_notification() {
     let (mut app, _rx, buffer) = app_with_config("", &[("ctrl+g", "nosuchcommand")]);
     assert_eq!(app.handle_key(ctrl('g')), None);
-    let text = format!("{:?}", buffer.lock().unwrap().blocks().last());
-    assert!(text.contains("mapping `:nosuchcommand`"), "{text}");
+    assert_error_notification(&app, "mapping `:nosuchcommand`");
+    assert!(lock(&buffer).blocks().is_empty());
 }
 
 /// An App with defaults and a usage snapshot whose working flag the
@@ -899,4 +899,62 @@ fn help_rows_come_from_the_live_keymap() {
     let rows = app.help_overlay.as_ref().unwrap().mapped_rows();
     assert!(rows.contains(&("ctrl+t", "dark theme")), "{rows:?}");
     assert!(!rows.iter().any(|(lhs, _)| *lhs == "ctrl+s"), "{rows:?}");
+}
+
+#[test]
+fn lua_toast_position_changes_move_the_live_card_to_each_corner() {
+    use crate::view::toast::ToastPosition;
+    let (mut app, _rx, _events) = app_with_events();
+    lock(&app.buffer).push_user("conversation");
+    let store = kage_plugin::SharedOptions::default();
+    let runtime = kage_plugin::PluginRuntime::builder()
+        .options(store.clone())
+        .build()
+        .unwrap();
+    app.set_options(store, None);
+    app.notify("live positioned card");
+    let _rows = rendered(&mut app, 100, 24);
+    let id = app.toast_hit.unwrap().toast_id;
+    assert_eq!(app.toast_position, ToastPosition::BottomRight);
+    for (name, expected) in [
+        ("top-left", ToastPosition::TopLeft),
+        ("top-right", ToastPosition::TopRight),
+        ("bottom-left", ToastPosition::BottomLeft),
+        ("bottom-right", ToastPosition::BottomRight),
+    ] {
+        let before = app.toast_hit.unwrap();
+        runtime
+            .eval(&format!("kage.opt.toast_position = '{name}'"))
+            .unwrap();
+        assert_eq!(
+            app.toast_hit,
+            Some(before),
+            "changes wait for the next tick"
+        );
+        assert!(app.apply_option_changes());
+        let rows = rendered(&mut app, 100, 24);
+        assert!(
+            rows.iter().any(|row| row.contains("live positioned card")),
+            "{rows:?}"
+        );
+        assert_eq!(app.toast_position, expected);
+        let hit = app.toast_hit.unwrap();
+        assert_eq!(hit.toast_id, id);
+        let buffer = lock(&app.buffer);
+        if name.ends_with("left") {
+            assert_eq!(hit.area.x, buffer.last_area_x() + 2, "{name}");
+        } else {
+            assert_eq!(hit.area.right(), 98, "{name}");
+        }
+        if name.starts_with("top") {
+            assert_eq!(hit.area.y, buffer.last_area_y() + 1, "{name}");
+        } else {
+            assert_eq!(
+                hit.area.bottom(),
+                buffer.last_area_y() + buffer.last_area_height() - 1,
+                "{name}"
+            );
+        }
+    }
+    assert_eq!(app.live_toasts().len(), 1);
 }

@@ -280,6 +280,9 @@ mod tests {
         let s = lua_stub();
         assert!(s.contains("---@class kage.Options\n---@field theme string "));
         assert!(s.contains("---@field editor \"vim\"|\"modeless\" "));
+        assert!(s.contains(
+            "---@field toast_position \"top-left\"|\"top-right\"|\"bottom-left\"|\"bottom-right\" "
+        ));
         assert!(s.contains("---@field mouse boolean "));
         assert!(s.contains("---@type kage.Options\nkage.opt = {}\n"));
     }

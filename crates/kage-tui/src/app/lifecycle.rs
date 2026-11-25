@@ -31,6 +31,7 @@ impl App {
         let mut engine = Some(self.wake.1.clone());
         // Always paint once before the steady-state loop.
         let mut last_buffer_version = self.buffer_version();
+        let mut last_notification_revision = self.notification_revision();
         let mut last_spinner_idx = crate::view::spinner_frame_index();
         let mut last_draw = Instant::now();
         let mut needs_redraw = true;
@@ -88,10 +89,15 @@ impl App {
                 self.refresh_input_completion();
             }
             self.refresh_plugin_session_list_if_stale();
+            if self.notification_revision() != last_notification_revision {
+                needs_redraw = true;
+            }
             if needs_redraw {
+                let notification_revision = self.notification_revision();
                 self.draw(tui)?;
                 last_draw = Instant::now();
                 last_buffer_version = self.draw_snapshot_version;
+                last_notification_revision = notification_revision;
                 last_spinner_idx = crate::view::spinner_frame_index();
                 needs_redraw = false;
             }
@@ -439,6 +445,19 @@ impl App {
         let read_only = self.focused_read_only();
         let placeholder = self.agent_placeholder().or(plan_placeholder);
         let agents_total = self.agents_under_view();
+        let (unread_notifications, unread_errors) =
+            self.toasts.as_ref().map_or((0, false), |handle| {
+                let state = lock(handle);
+                (
+                    state.unread_count(),
+                    state
+                        .history
+                        .iter()
+                        .any(|entry| !entry.reviewed && entry.kind == ToastKind::Error),
+                )
+            });
+        let hide_toasts =
+            self.modal_open() || self.context_menu.is_some() || self.input_completion.is_some();
         let status = view::StatusCtx {
             model: model_label.as_deref(),
             session_id: self.status_session_id.as_deref(),
@@ -464,6 +483,10 @@ impl App {
             breadcrumb: breadcrumb.as_ref(),
             placeholder: placeholder.as_deref(),
             command_end: self.draft_command_end(),
+            toast_position: self.toast_position,
+            hide_toasts,
+            unread_notifications,
+            unread_errors,
         };
         let screen_selection = self.screen_selection;
         let mut captured_rows = std::mem::take(&mut self.captured_rows);
@@ -480,11 +503,13 @@ impl App {
             && self.todo_list_overlay.is_none()
             && self.approval_panel.is_none()
             && self.help_overlay.is_none()
+            && self.notifications_overlay.is_none()
             && self.plugin_overlay.is_none();
         let picker = self.picker.as_mut();
         let settings_overlay = self.settings_overlay.as_mut();
         let session_tree = self.session_tree.as_mut();
         let help_overlay = self.help_overlay.as_mut();
+        let notifications_overlay = self.notifications_overlay.as_mut();
         let agents_overlay = self.agents_overlay.as_mut();
         let todo_list_overlay = self.todo_list_overlay.as_mut();
         let plugin_overlay = self.plugin_overlay.as_mut();
@@ -501,6 +526,7 @@ impl App {
         let input = &self.input;
         let color_depth = self.color_depth;
         let mut pinned_area = ratatui::layout::Rect::default();
+        let mut toast_hit = None;
         terminal
             .draw(|frame| {
                 let area = frame.area();
@@ -530,7 +556,7 @@ impl App {
                     pinned_area = agents;
                     box_regions.input = input_box;
                 }
-                view::render(
+                toast_hit = view::render(
                     frame,
                     view_regions,
                     &mut buffer,
@@ -566,6 +592,9 @@ impl App {
                 if let Some(todos) = todo_list_overlay {
                     crate::overlay::widget::paint_modal(frame, todos, above_input);
                 }
+                if let Some(notifications) = notifications_overlay {
+                    crate::overlay::widget::paint_modal(frame, notifications, above_input);
+                }
                 if let Some(help) = help_overlay {
                     crate::overlay::widget::paint_modal(frame, help, above_input);
                 }
@@ -589,6 +618,8 @@ impl App {
         lock(&self.buffer).merge_render_state(&buffer);
         self.park_draw_snapshot(buffer, buffer_version);
         self.captured_rows = captured_rows;
+        self.toast_hit = toast_hit;
+        self.sync_toast_hover();
         self.pinned_hits = (pinned_area.y..pinned_area.bottom())
             .zip(view::pinned_shown_agents(&agent_rows))
             .map(|(row, agent)| (row, agent.session))

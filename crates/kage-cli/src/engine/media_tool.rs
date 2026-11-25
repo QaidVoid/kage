@@ -560,22 +560,17 @@ mod tests {
              [tools.generate_music]\nmodel = \"\"\n",
         )
         .unwrap();
-        let buffer = kage_tui::events::shared_buffer();
-        let sink = kage_tui::hostlog::buffer_host_log(
-            buffer.clone(),
-            kage_tui::toast::shared_toasts(),
-            Arc::default(),
-        );
+        let toasts = kage_tui::toast::shared_toasts();
+        let sink = kage_tui::hostlog::notification_host_log(toasts.clone());
         let tools = kage_tools::builtin_registry().with_media_tools_log(&config, &sink);
-        let buffer = lock(&buffer);
-        assert_eq!(buffer.blocks().len(), 4);
+        let notifications = lock(&toasts);
+        assert_eq!(notifications.history.len(), 4);
         for name in crate::engine::MEDIA_TOOLS {
             assert!(tools.get(name).is_none());
-            assert!(buffer.blocks().iter().any(|block| matches!(
-                block.as_ref(),
-                kage_tui::buffer::Block::Custom { text, .. }
-                    if text.starts_with(&format!("[Warn] [tools.{name}]"))
-            )));
+            assert!(notifications.history.iter().any(|notification| {
+                notification.kind == kage_tui::toast::ToastKind::Warning
+                    && notification.text.starts_with(&format!("[tools.{name}]"))
+            }));
         }
     }
 

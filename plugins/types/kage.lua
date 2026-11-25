@@ -549,6 +549,7 @@
 ---@field input_min_lines integer Minimum content rows of the input box.
 ---@field input_max_lines integer Content rows the input box grows to before it scrolls.
 ---@field transcript_on_exit "full"|"last"|"none" What prints after exit: the whole transcript, from the last prompt on, or only the session path and a resume hint.
+---@field toast_position "top-left"|"top-right"|"bottom-left"|"bottom-right" Corner for floating notifications. Defaults to bottom-right.
 ---@field thinking_level ""|"off"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max"|"ultra" Thinking level for new sessions, or empty for auto (high, or the nearest level the model accepts).
 ---@field compaction_threshold number Fraction of the context window that triggers automatic compaction. The reply reserve can trigger it earlier. 0 disables all automatic compaction, including the reserve trigger.
 ---@field compaction_reserve_tokens integer Reply tokens to keep free before automatic compaction, capped by the model output limit plus a 2% context margin and half the window. 0 disables only the reserve trigger. Does not change request output limits.

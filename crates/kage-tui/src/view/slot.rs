@@ -568,11 +568,33 @@ fn paint_row(
     };
     let mut spans = match badge.filter(|badge| badge.width() <= left_budget) {
         Some(badge) => {
-            let left = clip_spans(left, left_budget.saturating_sub(badge.width() + 1));
-            let mut spans = vec![badge];
-            if left.iter().any(|span| span.width() > 0) {
-                spans.push(Span::styled(" ", styles.pad));
-                spans.extend(left);
+            let sep = if spec.sep.is_empty() {
+                " \u{b7} "
+            } else {
+                &spec.sep
+            };
+            let mut spans = clip_spans(
+                left,
+                left_budget.saturating_sub(badge.width() + sep.width()),
+            );
+            if spans.iter().any(|span| span.width() > 0) {
+                let at = spec
+                    .left
+                    .iter()
+                    .position(|item| matches!(item, SlotItem::Builtin("permission")))
+                    .map_or(spans.len(), |i| {
+                        row_spans(&spec.left[..=i], &spec.sep, src, styles).len()
+                    })
+                    .min(spans.len());
+                let separator = Span::styled(sep.to_owned(), styles.sep);
+                let inserted = if at == 0 {
+                    [badge, separator]
+                } else {
+                    [separator, badge]
+                };
+                spans.splice(at..at, inserted);
+            } else {
+                spans.push(badge);
             }
             spans
         }

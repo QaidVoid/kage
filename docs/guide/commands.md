@@ -94,7 +94,8 @@ its display time. The burst queue is bounded, and overflow remains in history.
 With mouse capture enabled, hovering pauses the current card and clicking it
 dismisses it, moving to the next waiting notice. Dismissal does not mark a
 warning reviewed. Unreviewed warnings and errors leave a compact footer badge,
-such as `2 alerts`, even after their cards expire or are dismissed. The badge
+such as `ask when needed · 2 alerts`, even after their cards expire or are dismissed.
+The badge follows permission mode, separated from it by a muted divider, and
 disappears when all retained issues are reviewed. It shares an existing footer
 row without taking space from the conversation. Cards yield to open menus,
 dialogs, and completion lists.

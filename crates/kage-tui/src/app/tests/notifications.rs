@@ -419,7 +419,7 @@ fn assert_footer_alerts(rows: &[String], count: usize) {
     }
     let badge = format!("{count} alert{}", if count == 1 { "" } else { "s" });
     let (footer, above) = rows.split_last().unwrap();
-    assert!(footer.trim_start().starts_with(&badge), "{rows:?}");
+    assert!(footer.contains(&badge), "{rows:?}");
     assert!(above.iter().all(|row| !row.contains(&badge)), "{rows:?}");
 }
 

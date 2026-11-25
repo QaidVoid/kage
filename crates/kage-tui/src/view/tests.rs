@@ -940,6 +940,35 @@ fn footer_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
 }
 
 #[test]
+fn footer_alerts_follow_permission_before_other_status_with_a_separator() {
+    let usage = SessionUsage {
+        model: "fake:model".into(),
+        ..SessionUsage::default()
+    };
+    let mut status = StatusCtx {
+        unread_notifications: 1,
+        slots: footer_with_rows(vec![kage_plugin::SlotSpec {
+            left: vec![
+                kage_plugin::SlotItem::Builtin("permission"),
+                footer_text("2 agents"),
+            ],
+            sep: " \u{b7} ".into(),
+            ..kage_plugin::SlotSpec::default()
+        }]),
+        ..StatusCtx::default()
+    };
+    assert_eq!(
+        footer_rows(&paint_footer(&status, Some(&usage), 80, 1, 0)),
+        [" ask when needed \u{b7} 1 alert \u{b7} 2 agents"]
+    );
+    status.unread_notifications = 0;
+    assert_eq!(
+        footer_rows(&paint_footer(&status, Some(&usage), 80, 1, 0)),
+        [" ask when needed \u{b7} 2 agents"]
+    );
+}
+
+#[test]
 fn footer_alerts_are_compact_pluralized_and_severity_colored() {
     let theme = crate::theme::current();
     let mut status = StatusCtx {
@@ -961,8 +990,13 @@ fn footer_alerts_are_compact_pluralized_and_severity_colored() {
         status.unread_notifications = count;
         status.unread_errors = errors;
         let buffer = paint_footer(&status, None, 40, 1, 0);
-        assert_eq!(footer_rows(&buffer), [format!("{label} custom status")]);
-        for x in 0..u16::try_from(label.len()).unwrap() {
+        assert_eq!(
+            footer_rows(&buffer),
+            [format!("custom status \u{b7} {label}")]
+        );
+        let start = u16::try_from("custom status \u{b7} ".chars().count()).unwrap();
+        assert_eq!(buffer[(start - 2, 0)].fg, theme.muted_fg);
+        for x in start..start + u16::try_from(label.len()).unwrap() {
             assert_eq!(buffer[(x, 0)].fg, color);
             assert!(!buffer[(x, 0)].modifier.contains(Modifier::BOLD));
         }
@@ -995,11 +1029,11 @@ fn footer_alerts_use_only_the_last_painted_row_without_changing_height() {
     assert_eq!(height(&status), 4);
     assert_eq!(
         footer_rows(&paint_footer(&status, None, 40, 2, 0)),
-        ["first", "4 alerts second"]
+        ["first", "second \u{b7} 4 alerts"]
     );
     assert_eq!(
         footer_rows(&paint_footer(&status, None, 40, 4, 1)),
-        ["", "second", "third", "4 alerts fourth"]
+        ["", "second", "third", "fourth \u{b7} 4 alerts"]
     );
     status.unread_notifications = 0;
     assert_eq!(height(&status), 4);
@@ -1031,7 +1065,7 @@ fn footer_alerts_fit_whole_labels_in_empty_and_narrow_custom_footers() {
     );
     assert_eq!(
         footer_rows(&paint_footer(&status, None, 11, 1, 0)),
-        ["1 alert ..."]
+        ["1 alert"]
     );
     assert_eq!(
         footer_rows(&paint_footer(&status, None, 6, 1, 0)),
@@ -1073,8 +1107,8 @@ fn footer_alerts_preserve_custom_right_fields_and_their_fit_decisions() {
             }
         }
         let row = &footer_rows(&alerts)[0];
-        if row.starts_with("12") {
-            assert!(row.starts_with("12 alerts"), "width {width}: {row:?}");
+        if row.contains("12") {
+            assert!(row.contains("12 alerts"), "width {width}: {row:?}");
         }
     }
 }
@@ -1161,7 +1195,10 @@ fn footer_alerts_leave_default_model_and_context_fields_visible() {
         rows[0].ends_with("Fake \u{b7} 12% ctx (24k/200k)"),
         "{rows:?}"
     );
-    assert!(rows[1].starts_with("2 alerts"), "{rows:?}");
+    assert!(
+        rows[1].starts_with(" ask when needed \u{b7} 2 alerts"),
+        "{rows:?}"
+    );
     assert_eq!(rows.iter().filter(|row| row.contains("alerts")).count(), 1);
 }
 
@@ -1213,7 +1250,7 @@ fn footer_alerts_yield_to_single_command_and_search_rows_but_use_lower_rows() {
                 usize::from(multirow)
             );
             if multirow {
-                assert_eq!(rows.last().unwrap(), "2 alerts bottom");
+                assert_eq!(rows.last().unwrap(), "bottom \u{b7} 2 alerts");
             }
         }
     }

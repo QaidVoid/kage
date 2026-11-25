@@ -260,6 +260,37 @@ mod tests {
 
     #[test]
     fn rejects_private_url() {
+        const CHILD: &str = "KAGE_WEB_FETCH_PRIVATE_URL_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "builtin::web_fetch::tests::rejects_private_url",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1");
+            for name in [
+                "HTTP_PROXY",
+                "http_proxy",
+                "HTTPS_PROXY",
+                "https_proxy",
+                "ALL_PROXY",
+                "all_proxy",
+                "NO_PROXY",
+                "no_proxy",
+            ] {
+                command.env_remove(name);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "stdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let err = WebFetchTool::default()
             .execute(
                 serde_json::json!({"url": "http://127.0.0.1:8080/x"}),

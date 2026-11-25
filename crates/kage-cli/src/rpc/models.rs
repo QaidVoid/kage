@@ -50,7 +50,7 @@ pub(super) fn catalog(registry: &ProviderRegistry) -> ModelsResponse {
                                 cost: m.cost,
                                 reasoning: m.reasoning,
                                 input: m.input,
-                                released: None,
+                                released: m.release_date.as_deref(),
                             },
                         )
                     })
@@ -92,5 +92,32 @@ fn entry(provider: &str, id: &str, name: &str, facts: Facts<'_>) -> ModelEntry {
             .collect(),
         images: facts.input.contains(Modality::Image),
         released: facts.released.map(str::to_owned),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn declared_model_preserves_release_date_and_total_context() {
+        let registry = ProviderRegistry::new().with(std::sync::Arc::new(
+            kage_provider::openai::OpenAiProvider::new("unused").with_models(vec![
+                kage_provider::ProviderModel {
+                    id: "example".into(),
+                    name: "Example".into(),
+                    context: Some(200_000),
+                    input_limit: Some(180_000),
+                    release_date: Some("2026-11-01".into()),
+                    ..kage_provider::ProviderModel::default()
+                },
+            ]),
+        ));
+
+        let response = catalog(&registry);
+        let model = &response.providers[0].models[0];
+        assert_eq!(model.id, "openai/example");
+        assert_eq!(model.context, Some(200_000));
+        assert_eq!(model.released.as_deref(), Some("2026-11-01"));
     }
 }

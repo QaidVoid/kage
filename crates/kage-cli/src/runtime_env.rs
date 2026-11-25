@@ -27,17 +27,7 @@ fn model_entry(
         return declared;
     }
     let m = kage_provider::catalog::model(provider_id, model_id)?;
-    Some(kage_provider::ProviderModel {
-        id: m.id.to_owned(),
-        name: m.name.to_owned(),
-        context: m.prompt_window(),
-        max_output: m.output.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
-        reasoning: m.reasoning,
-        input: m.input,
-        produces: m.produces,
-        interleaved: m.interleaved,
-        cost: m.cost,
-    })
+    Some(kage_provider::ProviderModel::from(m))
 }
 
 /// Look up how many tokens a prompt to `qualified_model`
@@ -46,7 +36,7 @@ fn model_entry(
 /// else the catalog's input limit or context window.
 #[must_use]
 pub fn context_window_for(registry: &ProviderRegistry, qualified_model: &str) -> Option<u64> {
-    model_entry(registry, qualified_model)?.context
+    model_entry(registry, qualified_model)?.prompt_window()
 }
 
 /// Thinking settings `qualified_model` accepts, from the provider's own
@@ -206,6 +196,29 @@ fn instructions_block(files: &[(std::path::PathBuf, &'static str)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_window_uses_declared_prompt_limit() {
+        let registry = ProviderRegistry::new().with(std::sync::Arc::new(
+            kage_provider::openai::OpenAiProvider::new("unused").with_models(vec![
+                kage_provider::ProviderModel {
+                    id: "example".into(),
+                    context: Some(200_000),
+                    input_limit: Some(180_000),
+                    ..kage_provider::ProviderModel::default()
+                },
+            ]),
+        ));
+
+        assert_eq!(
+            context_window_for(&registry, "openai/example"),
+            Some(180_000)
+        );
+        assert_eq!(
+            model_entry(&registry, "openai/example").unwrap().context,
+            Some(200_000)
+        );
+    }
 
     #[test]
     fn build_includes_role_and_env_block() {

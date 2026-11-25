@@ -626,7 +626,7 @@ impl Default for ProviderConfig {
 /// * `[providers.custom.<id>]` defines a brand-new provider with its own
 ///   id, base URL, and model list.
 /// * `[providers.<registered-id>]` overrides settings of a provider kage
-///   registers itself (base URL, key variable, extra headers).
+///   registers itself (base URL, key variable, extra headers, models).
 ///
 /// The named `custom` field holds the first shape; every other key is
 /// flattened into `overrides`, keyed by provider id.
@@ -680,35 +680,41 @@ impl ProvidersConfig {
                     "[providers.custom.{id}] must declare at least one [[providers.custom.{id}.models]] entry, or a models_url to list them from"
                 )));
             }
-            for model in &cfg.models {
-                let Some(cost) = model.cost else { continue };
-                let prices = [
-                    ("input", Some(cost.input)),
-                    ("output", Some(cost.output)),
-                    ("cache_read", cost.cache_read),
-                    ("cache_write", cost.cache_write),
-                ];
-                for (key, price) in prices {
-                    if let Some(price) = price
-                        && !(price.is_finite() && price >= 0.0)
-                    {
-                        return Err(config_error(format!(
-                            "[providers.custom.{id}] model `{}` has cost.{key} = {price}; prices must be finite and not negative",
-                            model.id
-                        )));
-                    }
-                }
-            }
+            validate_model_costs(&format!("providers.custom.{id}"), &cfg.models)?;
         }
-        for id in self.overrides.keys() {
+        for (id, cfg) in &self.overrides {
             if !overridable_ids.contains(&id.as_str()) {
                 return Err(config_error(format!(
                     "[providers.{id}] does not name a provider that can be overridden"
                 )));
             }
+            validate_model_costs(&format!("providers.{id}"), &cfg.models)?;
         }
         Ok(())
     }
+}
+
+fn validate_model_costs(section: &str, models: &[CustomProviderModel]) -> Result<()> {
+    for model in models {
+        let Some(cost) = model.cost else { continue };
+        let prices = [
+            ("input", Some(cost.input)),
+            ("output", Some(cost.output)),
+            ("cache_read", cost.cache_read),
+            ("cache_write", cost.cache_write),
+        ];
+        for (key, price) in prices {
+            if let Some(price) = price
+                && !(price.is_finite() && price >= 0.0)
+            {
+                return Err(config_error(format!(
+                    "[{section}] model `{}` has cost.{key} = {price}; prices must be finite and not negative",
+                    model.id
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn config_error(message: String) -> crate::error::Error {
@@ -827,27 +833,32 @@ fn default_true() -> bool {
     true
 }
 
-/// One model a custom provider serves
-/// (`[[providers.custom.<id>.models]]`).
+/// A custom provider model (`[[providers.custom.<id>.models]]`) or a
+/// built-in model override (`[[providers.<id>.models]]`).
+///
+/// For overrides, fields left unset or empty keep the existing model's
+/// values. Standalone custom models use the defaults described below.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CustomProviderModel {
     /// Model id sent to the endpoint; addressable from kage as
     /// `<provider-id>:<this id>`.
     pub id: String,
-    /// Display name shown in the picker. Empty shows the id, or for a
-    /// provider with a `models_url` keeps the listed name.
+    /// Display name shown in the picker. Empty inherits for overrides
+    /// and shows the id for standalone models.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
     /// Context window in tokens, when known. Surfaces to the modeline
-    /// like a catalog entry's context.
+    /// like a catalog entry's context. Built-in overrides also replace
+    /// any separate prompt input limit with this window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<u64>,
     /// Maximum output tokens per turn, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output: Option<u32>,
-    /// Whether the model thinks. Left unset, thinking is unknown:
-    /// explicit levels are sent as chosen and the automatic default
-    /// sends nothing. `true` offers every level.
+    /// Whether the model thinks. Unset inherits for overrides. For
+    /// standalone models, thinking is unknown: explicit levels are sent
+    /// as chosen and the automatic default sends nothing. `true` offers
+    /// every level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<bool>,
     /// Effort values the model accepts (`none`, `minimal`, `low`,
@@ -864,22 +875,22 @@ pub struct CustomProviderModel {
     #[serde(default, skip_serializing_if = "Modalities::is_empty")]
     pub produces: Modalities,
     /// Assistant message field (`reasoning_content` or
-    /// `reasoning_details`) an `openai` kind model reads its reasoning
-    /// back from during a tool loop. Unset sends reasoning back as
-    /// `<thinking>` text.
+    /// `reasoning_details`) an OpenAI-compatible model reads its
+    /// reasoning back from during a tool loop. Unset inherits for
+    /// overrides; standalone models follow the streamed reasoning field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interleaved: Option<ReasoningField>,
     /// Per-million-token prices in USD (`input`, `output`, and the
-    /// optional `cache_read` and `cache_write`). Left unset, the cost of
-    /// this model is unknown.
+    /// optional `cache_read` and `cache_write`). Unset inherits for
+    /// overrides and is unknown for standalone models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<ModelCost>,
 }
 
 impl CustomProviderModel {
     /// This entry laid over `listed`, the model of the same id the
-    /// provider's `models_url` lists: each field this entry sets wins,
-    /// and each it leaves unset keeps the listed value.
+    /// provider's `models_url` or built-in catalog lists: each field this
+    /// entry sets wins, and each it leaves unset keeps the listed value.
     #[must_use]
     pub fn merged_over(&self, listed: &Self) -> Self {
         let or = |mine: Modalities, theirs: Modalities| if mine.is_empty() { theirs } else { mine };
@@ -954,6 +965,11 @@ pub struct BuiltinProviderOverride {
     /// Extra HTTP headers sent on every request to this provider.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
+    /// Model overrides (`[[providers.<id>.models]]`), matched by id.
+    /// Fields left unset or empty keep the catalog or backend values.
+    /// Entries absent from that list add models.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<CustomProviderModel>,
     /// `openai` only: offer `OpenAI`'s hosted image tool to
     /// every model, so a model can answer with images. The tool runs at
     /// `OpenAI` and is billed on its own, so it is off unless set.
@@ -2705,11 +2721,166 @@ default = "ask"   # keep asking
                 Some("https://relay.example.com/v1")
             );
             assert_eq!(deepseek.api_key_env, None);
+            assert!(deepseek.models.is_empty());
             assert_eq!(
                 deepseek.headers.get("X-Team").map(String::as_str),
                 Some("infra")
             );
             assert!(!cfg.providers.custom.contains_key("deepseek"));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn builtin_model_overrides_parse_and_roundtrip_without_filling_absent_fields() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                r#"
+                [providers.deepseek]
+                base_url = "https://relay.example.com/v1"
+
+                [[providers.deepseek.models]]
+                id = "thinker"
+                name = "Thinker"
+                context = 131072
+                max_output = 8192
+                reasoning = true
+                efforts = ["low", "high"]
+                input = ["text", "image"]
+                produces = ["text", "audio"]
+                interleaved = "reasoning_details"
+                cost = { input = 0.27, output = 1.10, cache_read = 0.07, cache_write = 0.0 }
+
+                [[providers.deepseek.models]]
+                id = "plain"
+                reasoning = false
+                interleaved = "reasoning_content"
+                cost = { input = 0, output = 0 }
+
+                [[providers.deepseek.models]]
+                id = "inherited"
+
+                [providers.openai]
+                image_generation = true
+                "#,
+            )?;
+            let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
+            let deepseek = &cfg.providers.overrides["deepseek"];
+            let models = &deepseek.models;
+            assert_eq!(models.len(), 3);
+            assert_eq!(
+                models[0],
+                CustomProviderModel {
+                    id: "thinker".into(),
+                    name: "Thinker".into(),
+                    context: Some(131_072),
+                    max_output: Some(8192),
+                    reasoning: Some(true),
+                    efforts: Efforts::of(&[
+                        crate::thinking::Effort::Low,
+                        crate::thinking::Effort::High
+                    ]),
+                    input: Modalities::of(&[
+                        crate::modality::Modality::Text,
+                        crate::modality::Modality::Image
+                    ]),
+                    produces: Modalities::of(&[
+                        crate::modality::Modality::Text,
+                        crate::modality::Modality::Audio
+                    ]),
+                    interleaved: Some(ReasoningField::ReasoningDetails),
+                    cost: Some(ModelCost {
+                        input: 0.27,
+                        output: 1.10,
+                        cache_read: Some(0.07),
+                        cache_write: Some(0.0),
+                    }),
+                }
+            );
+            assert_eq!(models[1].reasoning, Some(false));
+            assert_eq!(
+                models[1].interleaved,
+                Some(ReasoningField::ReasoningContent)
+            );
+            assert_eq!(
+                models[1].cost,
+                Some(ModelCost {
+                    input: 0.0,
+                    output: 0.0,
+                    cache_read: None,
+                    cache_write: None,
+                })
+            );
+            assert_eq!(
+                models[2],
+                CustomProviderModel {
+                    id: "inherited".into(),
+                    ..CustomProviderModel::default()
+                }
+            );
+            cfg.providers
+                .validate(&["openai", "deepseek"], &["openai", "deepseek"])
+                .expect("valid model overrides pass");
+
+            let body = toml::to_string(&cfg).unwrap();
+            assert!(body.contains("[[providers.deepseek.models]]"), "{body}");
+            assert!(!body.contains("[[providers.openai.models]]"), "{body}");
+            let serialized: toml::Value = toml::from_str(&body).unwrap();
+            let providers = &serialized["providers"];
+            assert!(providers["openai"].get("models").is_none());
+            let inherited = providers["deepseek"]["models"][2].as_table().unwrap();
+            assert_eq!(inherited.len(), 1, "{inherited:?}");
+            assert_eq!(inherited["id"].as_str(), Some("inherited"));
+            jail.create_file("roundtrip.toml", &body)?;
+            let loaded = Config::load(jail.directory().join("roundtrip.toml").as_path()).unwrap();
+            assert_eq!(loaded, cfg);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn builtin_model_cost_validation_rejects_negative_and_nonfinite_prices() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            for key in ["input", "output", "cache_read", "cache_write"] {
+                for price in ["-0.5", "nan", "inf", "-inf"] {
+                    let mut prices = BTreeMap::from([("input", "1"), ("output", "2")]);
+                    prices.insert(key, price);
+                    let cost = prices
+                        .iter()
+                        .map(|(key, value)| format!("{key} = {value}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    jail.create_file(
+                        "bad.toml",
+                        &format!(
+                            r#"
+                        [[providers.deepseek.models]]
+                        id = "bad"
+                        cost = {{ {cost} }}
+                        "#
+                        ),
+                    )?;
+                    let cfg = Config::load(jail.directory().join("bad.toml").as_path()).unwrap();
+                    let err = cfg
+                        .providers
+                        .validate(&["deepseek"], &["deepseek"])
+                        .expect_err("invalid built-in model price must be rejected");
+                    let message = err.to_string();
+                    assert!(
+                        message.contains(&format!(
+                            "[providers.deepseek] model `bad` has cost.{key} = "
+                        )),
+                        "{message}"
+                    );
+                    assert!(
+                        message.contains("prices must be finite and not negative"),
+                        "{message}"
+                    );
+                }
+            }
             Ok(())
         });
     }
@@ -2943,6 +3114,7 @@ default = "ask"   # keep asking
                     api_key_env: None,
                     headers: BTreeMap::from([("X-Team".to_owned(), "infra".to_owned())]),
                     image_generation: false,
+                    models: Vec::new(),
                 },
             )]),
         };
@@ -3034,6 +3206,7 @@ default = "ask"   # keep asking
                 api_key_env: Some("DEEPSEEK_API_KEY".into()),
                 headers: BTreeMap::from([("X-Team".to_owned(), "infra".to_owned())]),
                 image_generation: false,
+                models: Vec::new(),
             },
         );
         let body = toml::to_string(&cfg).unwrap();

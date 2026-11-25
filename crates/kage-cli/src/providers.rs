@@ -168,7 +168,7 @@ pub(crate) fn validate_providers(
 /// Build a registry holding every configured provider: builtins and
 /// catalog entries whose API key is reachable through either an env var
 /// (priority) or the saved auth store, with `[providers.<id>]`
-/// overrides for base URL and extra headers, plus every custom
+/// overrides for transport and model metadata, plus every custom
 /// provider declared under `[providers.custom.*]`.
 ///
 /// # Errors
@@ -241,6 +241,7 @@ fn register_anthropic(
         {
             provider = provider.with_extra_headers(o.headers.clone());
         }
+        provider = provider.with_models(models_with_overrides("anthropic", Vec::new(), ov));
         registry.register(Arc::new(provider));
     }
 }
@@ -266,6 +267,7 @@ fn register_google(
         {
             provider = provider.with_extra_headers(o.headers.clone());
         }
+        provider = provider.with_models(models_with_overrides("google", Vec::new(), ov));
         registry.register(Arc::new(provider));
     }
 }
@@ -319,6 +321,7 @@ fn register_openai(
                 .with_image_generation(o.image_generation)
                 .with_extra_headers(o.headers.clone());
         }
+        provider = provider.with_models(models_with_overrides("openai", Vec::new(), ov));
         registry.register(Arc::new(provider));
         return;
     }
@@ -366,11 +369,13 @@ fn register_chatgpt(
     }
     .with_bearer(Arc::new(chatgpt::ChatGptBearer::new(oauth, path)))
     .with_extra_headers(headers)
-    .with_models(
+    .with_models(models_with_overrides(
+        "openai",
         chatgpt::models_cache_path()
             .map(|cache| chatgpt::cached_models(&cache))
             .unwrap_or_default(),
-    )
+        ov,
+    ))
     .for_chatgpt_backend();
     if let Some(o) = ov {
         provider = provider.with_image_generation(o.image_generation);
@@ -393,13 +398,72 @@ fn register_compat_providers(
             .unwrap_or_else(|| auth::env_var_for(entry.id));
         if let Some(key) = lookup_key_with_env(entry.id, env, store) {
             let headers = ov.map(|o| o.headers.clone()).unwrap_or_default();
-            let provider = match ov.and_then(|o| o.base_url.clone()) {
-                Some(base) => entry.build_with_base_url(key, base, headers),
-                None => entry.build(key, headers),
-            };
+            let provider = entry.build_with_models(
+                key,
+                ov.and_then(|o| o.base_url.as_deref())
+                    .unwrap_or(entry.base_url),
+                headers,
+                models_with_overrides(entry.id, Vec::new(), ov),
+            );
             registry.register(provider);
         }
     }
+}
+
+/// Apply configured model fields to the backend's list, or the catalog
+/// when the backend leaves its models to the catalog.
+fn models_with_overrides(
+    id: &str,
+    mut models: Vec<kage_provider::ProviderModel>,
+    overrides: Option<&kage_core::config::BuiltinProviderOverride>,
+) -> Vec<kage_provider::ProviderModel> {
+    let Some(overrides) = overrides.filter(|o| !o.models.is_empty()) else {
+        return models;
+    };
+    if models.is_empty() {
+        if let Some(info) = kage_provider::catalog::provider(id) {
+            models = info.models.iter().map(Into::into).collect();
+        }
+        // Declared lists default to their first entry, while the catalog
+        // chooses by release date. Keep that choice when materializing it.
+        if let Some(preferred) = kage_provider::catalog::preferred_model(id)
+            && let Some(index) = models.iter().position(|m| m.id == preferred.id)
+        {
+            models.swap(0, index);
+        }
+    }
+    for patch in &overrides.models {
+        let model = if let Some(index) = models.iter().position(|m| m.id == patch.id) {
+            &mut models[index]
+        } else {
+            models.push(kage_provider::ProviderModel {
+                id: patch.id.clone(),
+                name: patch.label().to_owned(),
+                ..kage_provider::ProviderModel::default()
+            });
+            models.last_mut().expect("just appended a model")
+        };
+        if !patch.name.is_empty() {
+            model.name.clone_from(&patch.name);
+        }
+        if let Some(context) = patch.context {
+            model.context = Some(context);
+            model.input_limit = None;
+        }
+        model.max_output = patch.max_output.or(model.max_output);
+        if patch.reasoning.is_some() || !patch.efforts.is_empty() {
+            model.reasoning = patch.reasoning();
+        }
+        if !patch.input.is_empty() {
+            model.input = patch.input;
+        }
+        if !patch.produces.is_empty() {
+            model.produces = patch.produces;
+        }
+        model.interleaved = patch.interleaved.or(model.interleaved);
+        model.cost = patch.cost.or(model.cost);
+    }
+    models
 }
 
 /// Register every custom provider declared under
@@ -451,6 +515,7 @@ fn register_custom_providers(
                 produces: m.produces,
                 interleaved: m.interleaved,
                 cost: m.cost,
+                ..kage_provider::ProviderModel::default()
             })
             .collect();
         let provider: Arc<dyn kage_provider::Provider> = match cfg.kind {
@@ -796,11 +861,27 @@ mod tests {
             r#"
             [providers.openai]
             base_url = "http://{addr}/backend-api/codex"
+            [[providers.openai.models]]
+            id = "gpt-5.2"
+            context = 123456
             "#
         ))
         .unwrap();
         let mut registry = ProviderRegistry::new();
         register_openai(&config, &chatgpt_store(), &|_| None, &mut registry);
+        assert_eq!(
+            crate::runtime_env::context_window_for(&registry, "openai/gpt-5.2"),
+            Some(123_456),
+        );
+        assert_eq!(
+            kage_provider::model_cost(registry.get("openai").unwrap().as_ref(), "gpt-5.2"),
+            Some(kage_core::ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: Some(0.0),
+                cache_write: Some(0.0),
+            }),
+        );
         stream_once(&registry, "openai/gpt-5.2");
         let request = server.join().unwrap();
         assert!(
@@ -849,6 +930,306 @@ mod tests {
             "{request}"
         );
         assert!(!request.contains("chatgpt-account-id"), "{request}");
+    }
+
+    #[test]
+    fn model_overrides_preserve_backend_metadata_and_lists() {
+        use kage_core::{Modalities, Modality, Reasoning, ReasoningField};
+        use kage_provider::ProviderModel;
+
+        let original = ProviderModel {
+            id: "plan-model".into(),
+            name: "Plan Model".into(),
+            context: Some(200_000),
+            input_limit: Some(180_000),
+            max_output: Some(20_000),
+            reasoning: Reasoning::Budget {
+                min: 1024,
+                max: Some(8192),
+                toggle: false,
+            },
+            input: Modalities::of(&[Modality::Text, Modality::Image]),
+            produces: Modalities::of(&[Modality::Text]),
+            interleaved: Some(ReasoningField::ReasoningContent),
+            release_date: Some("2026-11-01".into()),
+            cost: Some(kage_core::ModelCost {
+                input: 1.0,
+                output: 2.0,
+                cache_read: Some(0.1),
+                cache_write: None,
+            }),
+        };
+        let overrides: kage_core::config::BuiltinProviderOverride = toml::from_str(
+            r#"
+            [[models]]
+            id = "plan-model"
+            max_output = 30000
+            [[models]]
+            id = "not-in-the-catalog"
+            context = 64000
+            efforts = ["low", "high"]
+            "#,
+        )
+        .unwrap();
+        let models = models_with_overrides("openai", vec![original.clone()], Some(&overrides));
+        assert_eq!(
+            models.len(),
+            2,
+            "do not expose models outside the backend list"
+        );
+        assert_eq!(
+            models[0],
+            ProviderModel {
+                max_output: Some(30_000),
+                ..original.clone()
+            }
+        );
+        assert_eq!(models[1].id, "not-in-the-catalog");
+        assert_eq!(models[1].name, "not-in-the-catalog");
+        assert_eq!(models[1].context, Some(64_000));
+        assert_eq!(models[1].reasoning, overrides.models[1].reasoning());
+        assert_eq!(models[1].cost, None);
+
+        let refreshed = ProviderModel {
+            context: Some(400_000),
+            ..original
+        };
+        let models = models_with_overrides("openai", vec![refreshed.clone()], Some(&overrides));
+        assert_eq!(
+            models[0],
+            ProviderModel {
+                max_output: Some(30_000),
+                ..refreshed
+            }
+        );
+        assert!(models_with_overrides("openai", Vec::new(), None).is_empty());
+        assert!(
+            models_with_overrides(
+                "openai",
+                Vec::new(),
+                Some(&kage_core::config::BuiltinProviderOverride::default())
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn model_overrides_apply_all_explicit_metadata_fields() {
+        use kage_core::{Modalities, Modality, Reasoning, ReasoningField};
+        let original = kage_provider::ProviderModel {
+            id: "m".into(),
+            context: Some(200_000),
+            input_limit: Some(180_000),
+            reasoning: Reasoning::None,
+            ..Default::default()
+        };
+        let overrides: kage_core::config::BuiltinProviderOverride = toml::from_str(
+            r#"
+            [[models]]
+            id = "m"
+            name = "Overridden"
+            context = 300000
+            max_output = 40000
+            efforts = ["low", "high"]
+            input = ["text", "image"]
+            produces = ["text", "audio"]
+            interleaved = "reasoning_details"
+            cost = { input = 1.5, output = 3.0 }
+            "#,
+        )
+        .unwrap();
+        let models = models_with_overrides("openai", vec![original], Some(&overrides));
+        let model = &models[0];
+        assert_eq!(model.name, "Overridden");
+        assert_eq!(model.context, Some(300_000));
+        assert_eq!(model.prompt_window(), Some(300_000));
+        assert_eq!(model.max_output, Some(40_000));
+        assert_eq!(model.reasoning, overrides.models[0].reasoning());
+        assert_eq!(
+            model.input,
+            Modalities::of(&[Modality::Text, Modality::Image])
+        );
+        assert_eq!(
+            model.produces,
+            Modalities::of(&[Modality::Text, Modality::Audio])
+        );
+        assert_eq!(model.interleaved, Some(ReasoningField::ReasoningDetails));
+        assert_eq!(model.cost, overrides.models[0].cost);
+
+        let disabled: kage_core::config::BuiltinProviderOverride =
+            toml::from_str("[[models]]\nid = \"m\"\nreasoning = false\n").unwrap();
+        let models = models_with_overrides("openai", models, Some(&disabled));
+        assert_eq!(models[0].reasoning, Reasoning::None);
+    }
+
+    #[test]
+    fn builtin_interleaved_override_reaches_the_wire() {
+        use kage_core::{Content, Message, Role, ToolCallId};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_one(listener, b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: [DONE]\n\n");
+        let config: kage_core::config::Config = toml::from_str(&format!(
+            r#"
+            [providers.deepseek]
+            base_url = "http://{addr}/v1"
+            api_key_env = ""
+            [[providers.deepseek.models]]
+            id = "deepseek-v4-pro"
+            interleaved = "reasoning_details"
+            "#,
+        ))
+        .unwrap();
+        let mut store = auth::AuthStore::empty();
+        store.set_api_key("deepseek", "fake-key");
+        let mut registry = ProviderRegistry::new();
+        register_compat_providers(&config, &store, &mut registry);
+        let resolved = registry.resolve("deepseek/deepseek-v4-pro").unwrap();
+        let history = vec![
+            Message::new(
+                Role::User,
+                vec![Content::Text {
+                    text: "read it".into(),
+                }],
+                None,
+            ),
+            Message::new(
+                Role::Assistant,
+                vec![
+                    Content::Thinking {
+                        text: "need a file".into(),
+                        signature: None,
+                        duration_ms: None,
+                    },
+                    Content::ToolCall {
+                        id: ToolCallId::new("call_1"),
+                        name: "read".into(),
+                        input: serde_json::json!({}),
+                    },
+                ],
+                None,
+            ),
+            Message::new(
+                Role::ToolResult,
+                vec![Content::ToolResultBlock {
+                    call_id: ToolCallId::new("call_1"),
+                    output: "contents".into(),
+                    is_error: false,
+                }],
+                None,
+            ),
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+        let events: Vec<_> = resolved
+            .provider
+            .stream(
+                kage_provider::StreamRequest::new(resolved.model.clone(), history),
+                &kage_core::CancelFlag::new(),
+            )
+            .unwrap()
+            .collect();
+        assert!(events.iter().all(Result::is_ok), "{events:?}");
+        let request = server.join().unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(
+            body["messages"][1]["reasoning_details"],
+            serde_json::json!([
+                { "type": "reasoning.text", "text": "need a file" }
+            ])
+        );
+        assert!(body["messages"][1].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn builtin_model_overrides_reach_runtime_without_replacing_catalog() {
+        for id in [
+            "anthropic",
+            "google",
+            "openai",
+            "deepseek",
+            "commandcode-claude",
+        ] {
+            let catalog = kage_provider::catalog::provider(id).unwrap();
+            let original = catalog.models.first().unwrap();
+            let config: kage_core::config::Config = toml::from_str(&format!(
+                r#"
+                [providers.{id}]
+                api_key_env = ""
+                [[providers.{id}.models]]
+                id = "{model}"
+                context = 123456
+                [[providers.{id}.models]]
+                id = "new-upstream-model"
+                context = 64000
+                "#,
+                model = original.id,
+            ))
+            .unwrap();
+            let mut store = auth::AuthStore::empty();
+            store.set_api_key(id, "fake-key");
+            let (registry, _) = register_providers(&config, &store, &|_| None);
+            let addressed = kage_core::qualify_model(id, original.id);
+            assert_eq!(
+                crate::runtime_env::context_window_for(&registry, &addressed),
+                Some(123_456),
+                "{id} override must reach the runtime",
+            );
+            let provider = registry.get(id).unwrap();
+            let declared = provider.models();
+            assert_eq!(declared.len(), catalog.models.len() + 1, "{id}");
+            let added = kage_core::qualify_model(id, "new-upstream-model");
+            assert_eq!(
+                crate::runtime_env::context_window_for(&registry, &added),
+                Some(64_000)
+            );
+            assert!(
+                crate::tui::available_model_items(&registry, &addressed)
+                    .iter()
+                    .any(|item| item.value == added)
+            );
+            assert_eq!(
+                kage_provider::model_cost(provider.as_ref(), "new-upstream-model"),
+                None
+            );
+            assert_eq!(
+                declared.iter().find(|m| m.id == original.id).unwrap(),
+                &kage_provider::ProviderModel {
+                    context: Some(123_456),
+                    input_limit: None,
+                    ..original.into()
+                },
+            );
+            assert_eq!(
+                crate::runtime_env::reasoning_for(&registry, &addressed),
+                original.reasoning,
+            );
+            assert_eq!(
+                kage_provider::model_cost(provider.as_ref(), original.id),
+                original.cost,
+            );
+            assert_eq!(
+                provider_default_model(provider.as_ref()).as_deref(),
+                kage_provider::catalog::preferred_model(id).map(|m| m.id),
+            );
+            for model in catalog.models.iter().filter(|m| m.id != original.id) {
+                assert_eq!(
+                    declared.iter().find(|m| m.id == model.id).unwrap(),
+                    &kage_provider::ProviderModel::from(model),
+                );
+                let addressed = kage_core::qualify_model(id, model.id);
+                assert_eq!(
+                    crate::runtime_env::context_window_for(&registry, &addressed),
+                    model.prompt_window(),
+                );
+                assert_eq!(
+                    kage_provider::model_cost(provider.as_ref(), model.id),
+                    model.cost,
+                );
+            }
+        }
     }
 
     #[test]

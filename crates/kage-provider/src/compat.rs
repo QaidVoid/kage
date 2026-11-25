@@ -16,7 +16,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::{Provider, ProviderMetadata, anthropic::AnthropicProvider, openai::OpenAiProvider};
+use crate::{
+    Provider, ProviderMetadata, ProviderModel, anthropic::AnthropicProvider, openai::OpenAiProvider,
+};
 
 /// Wire format a compat entry speaks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -67,6 +69,19 @@ impl CompatProvider {
         base_url: impl Into<String>,
         extra_headers: BTreeMap<String, String>,
     ) -> Arc<dyn Provider> {
+        self.build_with_models(api_key, base_url, extra_headers, Vec::new())
+    }
+
+    /// Build with an endpoint, extra headers, and an explicit model list.
+    /// An empty list leaves model metadata to the catalog.
+    #[must_use]
+    pub fn build_with_models(
+        &self,
+        api_key: impl Into<String>,
+        base_url: impl Into<String>,
+        extra_headers: BTreeMap<String, String>,
+        models: Vec<ProviderModel>,
+    ) -> Arc<dyn Provider> {
         let metadata = ProviderMetadata {
             id: self.id.into(),
             display_name: self.display_name.into(),
@@ -77,12 +92,14 @@ impl CompatProvider {
         match self.kind {
             CompatKind::OpenAi => Arc::new(
                 OpenAiProvider::compatible(api_key, base_url, metadata)
-                    .with_extra_headers(extra_headers),
+                    .with_extra_headers(extra_headers)
+                    .with_models(models),
             ),
             CompatKind::Anthropic => Arc::new(
                 AnthropicProvider::with_base_url(api_key, base_url)
                     .with_metadata(metadata)
-                    .with_extra_headers(extra_headers),
+                    .with_extra_headers(extra_headers)
+                    .with_models(models),
             ),
         }
     }

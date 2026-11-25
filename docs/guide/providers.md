@@ -237,6 +237,34 @@ X-Team = "infra"
 
 Fields left out keep the provider's default.
 
+### model metadata overrides
+
+Add `[[providers.<provider-id>.models]]` entries to override model metadata
+from a built-in provider, the catalog, or the ChatGPT plan's model list:
+
+```toml
+[[providers.deepseek.models]]
+id = "deepseek-v4-pro"
+context = 262144
+max_output = 32768
+interleaved = "reasoning_content"
+```
+
+Each entry matches a model by `id` and patches only the fields it sets.
+Unmentioned fields and all other models stay unchanged. An id not in the
+provider's model list adds a model. Entries accept the same fields as
+[custom provider models](#custom-providers): `name`, `context`, `max_output`,
+`reasoning`, `efforts`, `input`, `produces`, `interleaved`, and `cost`.
+Empty strings and lists inherit the existing value. A supplied `cost`
+replaces the whole cost object rather than merging individual prices.
+There is no syntax to clear an inherited `interleaved` value. Setting
+`context` also replaces any separate prompt input limit from the catalog,
+so the configured window is the one used for context tracking.
+
+These overrides change metadata, not the provider's wire protocol, and do
+not make unsupported features work. Like other provider configuration,
+they belong only in the user config, not project config.
+
 ## request headers
 
 `headers` adds HTTP headers to every request a provider sends. It

@@ -591,8 +591,8 @@ fn parse_codex(json: &Value) -> Option<Vec<ProbeModel>> {
                 Some(ProbeModel {
                     id: entry["slug"].as_str()?.to_owned(),
                     name: entry["display_name"].as_str().map(str::to_owned),
-                    context: number_of(&entry["max_context_window"])
-                        .or_else(|| number_of(&entry["context_window"])),
+                    context: number_of(&entry["context_window"])
+                        .or_else(|| number_of(&entry["max_context_window"])),
                     efforts: entry["supported_reasoning_levels"]
                         .as_array()
                         .into_iter()
@@ -1114,6 +1114,7 @@ mod tests {
                     "display_name": "GPT-6 Sol",
                     "visibility": "list",
                     "context_window": 400_000,
+                    "max_context_window": 872_000,
                     "supported_reasoning_levels": [
                         { "effort": "low", "description": "fast" },
                         { "effort": "high", "description": "deep" },
@@ -1128,6 +1129,19 @@ mod tests {
         assert_eq!(models[0].name.as_deref(), Some("GPT-6 Sol"));
         assert_eq!(models[0].context, Some(400_000));
         assert_eq!(models[0].efforts, ["low", "high"]);
+    }
+
+    #[test]
+    fn backend_context_falls_back_to_maximum_only_when_default_is_missing() {
+        let models = super::parse_codex(&serde_json::json!({"models": [
+            {"slug": "default-only", "context_window": 272_000},
+            {"slug": "maximum-only", "max_context_window": 872_000},
+            {"slug": "unknown"}
+        ]}))
+        .unwrap();
+        assert_eq!(models[0].context, Some(272_000));
+        assert_eq!(models[1].context, Some(872_000));
+        assert_eq!(models[2].context, None);
     }
 
     #[test]

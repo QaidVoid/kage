@@ -604,9 +604,9 @@ fn parse_models(json: &Value) -> Vec<kage_provider::ProviderModel> {
                     .collect();
             Some(kage_provider::ProviderModel {
                 name: entry["display_name"].as_str().unwrap_or(&id).to_owned(),
-                context: entry["max_context_window"]
+                context: entry["context_window"]
                     .as_u64()
-                    .or_else(|| entry["context_window"].as_u64()),
+                    .or_else(|| entry["max_context_window"].as_u64()),
                 reasoning: if efforts.is_empty() {
                     kage_core::Reasoning::Unknown
                 } else {
@@ -997,7 +997,7 @@ mod tests {
     }
 
     /// The cache keeps the visible models and only the fields kage
-    /// reads, and reads back as free models with the backend's largest
+    /// reads, and reads back as free models with the backend's default
     /// context, the efforts kage knows, and their input kinds.
     #[test]
     fn the_plan_model_list_caches_visible_models_for_free() {
@@ -1028,7 +1028,7 @@ mod tests {
         let sol = &models[0];
         assert_eq!(sol.id, "gpt-6-sol");
         assert_eq!(sol.name, "GPT-6-Sol");
-        assert_eq!(sol.context, Some(872_000));
+        assert_eq!(sol.context, Some(272_000));
         assert_eq!(
             sol.reasoning,
             kage_core::Reasoning::Effort {
@@ -1049,6 +1049,18 @@ mod tests {
         assert_eq!(plain.name, "plain");
         assert_eq!(plain.context, Some(128_000));
         assert_eq!(plain.reasoning, kage_core::Reasoning::Unknown);
+    }
+
+    #[test]
+    fn plan_context_falls_back_to_maximum_only_when_default_is_missing() {
+        let models = parse_models(&serde_json::json!({"models": [
+            {"slug": "default-only", "context_window": 272_000},
+            {"slug": "maximum-only", "max_context_window": 872_000},
+            {"slug": "unknown"}
+        ]}));
+        assert_eq!(models[0].context, Some(272_000));
+        assert_eq!(models[1].context, Some(872_000));
+        assert_eq!(models[2].context, None);
     }
 
     #[test]

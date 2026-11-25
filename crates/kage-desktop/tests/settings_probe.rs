@@ -459,6 +459,7 @@ fn the_agent_page_draws_the_engine_options() {
         result: serde_json::json!({ "options": [
             option("thinking_level", "choice", serde_json::json!("medium"), serde_json::json!({"values": ["low", "medium", "xhigh"]})),
             option("compaction_threshold", "fraction", serde_json::json!(0.8), serde_json::json!({})),
+            option("compaction_reserve_tokens", "int", serde_json::json!(50000), serde_json::json!({"min": 0, "max": 4294967295_u64})),
             option("agent_max_depth", "int", serde_json::json!(3), serde_json::json!({"min": 1, "max": 8})),
             option("agent_max_turns", "int", serde_json::json!(0), serde_json::json!({"min": 0, "max": 500})),
             option("swarm_timeout_ms", "int", serde_json::json!(600000), serde_json::json!({"min": 60000, "max": 3600000})),
@@ -478,6 +479,17 @@ fn the_agent_page_draws_the_engine_options() {
         harness.query_all_by_label("Max depth").count() > 0,
         "the page draws the engine's agent options"
     );
+    assert!(
+        harness.query_all_by_label("Compaction reserve").count() > 0,
+        "the page draws the configurable reserve"
+    );
+    harness.query_all_by_label("More").nth(1).unwrap().click();
+    harness.run();
+    assert!(harness.state().2.iter().any(|event| matches!(
+        event,
+        SettingsEvent::EngineOption(name, value)
+            if name == "compaction_reserve_tokens" && value == &serde_json::json!(51_024)
+    )));
 }
 
 #[test]

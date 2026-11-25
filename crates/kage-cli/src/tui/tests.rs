@@ -147,6 +147,7 @@ fn options_set_in_init_lua_seed_the_first_session() {
     std::fs::write(
         user.path().join("init.lua"),
         "kage.opt.thinking_level = 'high'\nkage.opt.compaction_threshold = 0.5\n\
+         kage.opt.compaction_reserve_tokens = 12000\n\
          kage.opt.max_provider_retries = 7\nkage.opt.agent_max_depth = 2\nkage.opt.agent_max_running = 8\n\
          kage.opt.swarm_max_items = 64\nkage.opt.swarm_timeout_ms = 60000\n\
          kage.opt.agent_model = 'zai:glm-5'\nkage.opt.agent_thinking = 'low'",
@@ -175,6 +176,7 @@ fn options_set_in_init_lua_seed_the_first_session() {
     assert_eq!(agents.model.as_deref(), Some("zai/glm-5"));
     assert_eq!(agents.thinking, Some(kage_core::ThinkingLevel::Low));
     assert!((loop_cfg.compaction_threshold - 0.5).abs() < f32::EPSILON);
+    assert_eq!(loop_cfg.compaction_reserve_tokens, 12_000);
     assert_eq!(loop_cfg.max_provider_retries, 7);
 
     let defaults = crate::engine::AgentSetup::from_options(
@@ -183,4 +185,26 @@ fn options_set_in_init_lua_seed_the_first_session() {
         crate::engine::Background::Wake,
     );
     assert_eq!((defaults.model, defaults.thinking), (None, None));
+}
+
+#[test]
+fn lua_compaction_reserve_overrides_config_for_the_next_session_only() {
+    let mut config = kage_core::config::Config::default();
+    config.loop_settings.compaction_reserve_tokens = 24_000;
+    let (store, errors) = kage_core::options::OptionStore::from_config(&config);
+    assert!(errors.is_empty(), "{errors:?}");
+    let options = Arc::new(std::sync::Mutex::new(store));
+    let (current, _) = startup_options(&options);
+    assert_eq!(current.compaction_reserve_tokens, 24_000);
+
+    let rt = PluginRuntime::builder()
+        .options(Arc::clone(&options))
+        .build()
+        .unwrap();
+    rt.eval("kage.opt.compaction_reserve_tokens = 0").unwrap();
+    let (next, _) = startup_options(&options);
+    assert_eq!(next.compaction_reserve_tokens, 0);
+    assert!((next.compaction_threshold - current.compaction_threshold).abs() < f32::EPSILON);
+    assert_eq!(current.compaction_reserve_tokens, 24_000);
+    assert_eq!(config.loop_settings.compaction_reserve_tokens, 24_000);
 }

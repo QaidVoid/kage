@@ -137,10 +137,14 @@ timeoutlen = 1000
 
 [loop]
 # compact older history once the prompt fills this fraction of the
-# model context window (0.0 to 1.0). Compaction also fires early when
-# the remaining room can no longer hold a full reply. Applies to the
-# next session, and the /settings dialog edits it too.
+# model context window (0.0 to 1.0). The reserve below can trigger
+# compaction earlier. 0 disables automatic compaction and overflow
+# recovery. Applies to the next session, and /settings edits it too.
 compaction_threshold = 0.8
+# compact early when less than this many tokens remain for a reply.
+# 0 disables only this reserve trigger, not the fraction above.
+# Applies to the next session.
+compaction_reserve_tokens = 50000
 # how many times a turn that failed transiently (a dropped or stalled
 # stream, a 5xx, rate limiting) is re-issued before the error surfaces
 # (0 to 10). 0 turns auto-retry off. Applies to the next session.
@@ -209,6 +213,34 @@ involved. Your comments, key order and every other line stay as you
 wrote them. See [permissions](/guide/permissions) for the
 rules reference, [agents](/guide/agents#limits) for the `[agents]`
 limits, and [mcp](/guide/mcp) for MCP servers and OAuth logins.
+
+## automatic compaction
+
+Automatic compaction runs when the estimated next request reaches
+`loop.compaction_threshold` of the model's context window, or when the
+remaining window reaches `loop.compaction_reserve_tokens`, whichever comes
+first. The reserve defaults to 50,000 tokens and is capped at half the
+window and the model's known output limit plus a 2% estimation margin.
+Pending user messages and tool results count toward the next-request
+estimate, so compaction can start before the displayed context percentage
+reaches either boundary.
+
+For example, a 256,000-token window with a `0.95` threshold still compacts
+at 206,000 tokens, about 80.5%, with the default reserve. To let the 95%
+threshold win instead:
+
+```toml
+[loop]
+compaction_threshold = 0.95
+compaction_reserve_tokens = 8192
+```
+
+A smaller reserve retains more history but leaves less room for output.
+The requested output limit still shrinks to fit the remaining context.
+Setting the reserve to `0` disables only the reserve trigger. Setting the
+threshold to `0` disables automatic compaction, including overflow recovery;
+manual `/compact` remains available. Both settings apply to sessions opened
+after the change.
 
 ## built-in tools
 

@@ -529,11 +529,16 @@ fn set_key(root: &mut toml_edit::Table, keys: &[&str], value: &OptionValue) -> R
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoopSettings {
-    /// Trigger compaction once estimated token usage exceeds this
-    /// fraction of the model's context window. Must be in `[0.0, 1.0]`:
-    /// `0` disables compaction, and `1` compacts as soon as usage
-    /// reaches the context window.
+    /// Trigger automatic compaction once estimated token usage reaches this
+    /// fraction of the model's context window. Must be in `[0.0, 1.0]`.
+    /// The reply reserve can trigger compaction earlier. `0` disables all
+    /// automatic compaction, including the reserve trigger.
     pub compaction_threshold: f32,
+    /// Reply tokens to keep free before automatic compaction, capped by
+    /// the model's output limit plus a 2% context margin and half the window.
+    /// Defaults to 50,000. `0` disables only the reserve trigger, leaving
+    /// the fraction threshold active. Does not change request output limits.
+    pub compaction_reserve_tokens: u32,
     /// How many times to re-issue a turn whose provider request failed
     /// transiently before giving up. `0` disables auto-retry.
     pub max_provider_retries: u32,
@@ -543,6 +548,7 @@ impl Default for LoopSettings {
     fn default() -> Self {
         Self {
             compaction_threshold: 0.8,
+            compaction_reserve_tokens: 50_000,
             max_provider_retries: 4,
         }
     }
@@ -2153,6 +2159,10 @@ mod tests {
     #[test]
     fn loop_section_defaults_and_parses() {
         assert!((Config::default().loop_settings.compaction_threshold - 0.8).abs() < f32::EPSILON);
+        assert_eq!(
+            Config::default().loop_settings.compaction_reserve_tokens,
+            50_000
+        );
         let _globals = process_globals();
         figment::Jail::expect_with(|jail| {
             jail.create_file(
@@ -2160,12 +2170,34 @@ mod tests {
                 r"
                 [loop]
                 compaction_threshold = 0.6
+                compaction_reserve_tokens = 8192
                 ",
             )?;
             let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
             assert!((cfg.loop_settings.compaction_threshold - 0.6).abs() < f32::EPSILON);
+            assert_eq!(cfg.loop_settings.compaction_reserve_tokens, 8_192);
             Ok(())
         });
+    }
+
+    #[test]
+    fn loop_reserve_serde_defaults_and_bounds() {
+        let legacy: LoopSettings =
+            serde_json::from_str(r#"{"compaction_threshold":0.95}"#).unwrap();
+        assert_eq!(legacy.compaction_reserve_tokens, 50_000);
+        for reserve in [0, 8_192, u32::MAX] {
+            let settings: LoopSettings =
+                toml::from_str(&format!("compaction_reserve_tokens = {reserve}")).unwrap();
+            assert_eq!(settings.compaction_reserve_tokens, reserve);
+            let back: LoopSettings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+            assert_eq!(back, settings);
+        }
+        for reserve in [-1_i64, i64::from(u32::MAX) + 1] {
+            assert!(
+                toml::from_str::<LoopSettings>(&format!("compaction_reserve_tokens = {reserve}"))
+                    .is_err()
+            );
+        }
     }
 
     #[test]

@@ -11,7 +11,7 @@ use kage_provider::ProviderRegistry;
 use kage_session::{SessionId, SessionWriter};
 
 use crate::cli_printing::{print_envelope_json, print_event};
-use crate::engine::WithMediaTools as _;
+use crate::engine::{Background, WithMediaTools as _};
 use kage_core::agent_report::{AgentReport, ReportState};
 
 /// The layered config for `workdir`, refused when its permission rules
@@ -72,8 +72,7 @@ pub(crate) fn execute_print_run(
     for err in agent_errors {
         eprintln!("kage: {err}");
     }
-    let agents =
-        crate::engine::AgentSetup::from_config(defs, &layered, crate::engine::Background::Off);
+    let agents = crate::engine::AgentSetup::from_config(defs, &layered, Background::Off);
 
     let session = writer
         .as_ref()
@@ -115,6 +114,7 @@ pub(crate) fn execute_print_run(
         gate,
         loop_cfg: LoopConfig {
             compaction_threshold: layered.loop_settings.compaction_threshold,
+            compaction_reserve_tokens: layered.loop_settings.compaction_reserve_tokens,
             max_provider_retries: layered.loop_settings.max_provider_retries,
             ..LoopConfig::default()
         },

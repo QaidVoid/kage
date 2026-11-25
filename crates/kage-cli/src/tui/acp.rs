@@ -885,6 +885,10 @@ fn session_meta(
         .then(|| store.get("compaction_threshold"))
         .flatten()
         .and_then(OptionValue::as_float);
+    let reserve = set("compaction_reserve_tokens")
+        .then(|| store.get("compaction_reserve_tokens"))
+        .flatten()
+        .and_then(OptionValue::as_int);
     let retries = set("max_provider_retries")
         .then(|| store.get("max_provider_retries"))
         .flatten()
@@ -895,9 +899,10 @@ fn session_meta(
         .and_then(OptionValue::as_str)
         .and_then(ThinkingLevel::parse)
         .map(|level| level.as_str().to_owned());
-    let opt =
-        (threshold.is_some() || retries.is_some() || thinking.is_some()).then_some(SessionOpt {
+    let opt = (threshold.is_some() || reserve.is_some() || retries.is_some() || thinking.is_some())
+        .then_some(SessionOpt {
             compaction_threshold: threshold,
+            compaction_reserve_tokens: reserve,
             max_provider_retries: retries,
             thinking_level: thinking,
         });
@@ -8424,6 +8429,63 @@ mod tests {
         assert!(kage.yolo);
         assert_eq!(kage.system_prompt.as_deref(), Some("be brief"));
         assert!(kage.opt.is_none(), "nothing set sends nothing");
+    }
+
+    #[test]
+    fn compaction_reserve_meta_only_sends_explicit_values_for_new_sessions() {
+        let mut config = kage_core::config::Config::default();
+        config.loop_settings.compaction_reserve_tokens = 24_000;
+        let (store, errors) = kage_core::options::OptionStore::from_config(&config);
+        assert!(errors.is_empty(), "{errors:?}");
+        let options = Arc::new(Mutex::new(store));
+        let registry = ProviderRegistry::default();
+        let current = session_meta(&options, &registry, "test:model", "", false, false);
+        assert_eq!(
+            current
+                .kage
+                .as_ref()
+                .unwrap()
+                .opt
+                .as_ref()
+                .unwrap()
+                .compaction_reserve_tokens,
+            Some(24_000)
+        );
+
+        let runtime = kage_plugin::PluginRuntime::builder()
+            .options(Arc::clone(&options))
+            .build()
+            .unwrap();
+        runtime
+            .eval("kage.opt.compaction_reserve_tokens = 0")
+            .unwrap();
+        let next = session_meta(&options, &registry, "test:model", "", false, false);
+        let json = serde_json::to_value(&next).unwrap();
+        assert_eq!(json["kage"]["opt"]["compactionReserveTokens"], 0);
+        assert_eq!(
+            current
+                .kage
+                .as_ref()
+                .unwrap()
+                .opt
+                .as_ref()
+                .unwrap()
+                .compaction_reserve_tokens,
+            Some(24_000)
+        );
+        assert_eq!(config.loop_settings.compaction_reserve_tokens, 24_000);
+
+        let clean = kage_plugin::SharedOptions::default();
+        lock(&clean)
+            .set(
+                "compaction_threshold",
+                OptionValue::Float(0.6),
+                kage_core::options::OptionSource::Lua,
+            )
+            .unwrap();
+        let meta = session_meta(&clean, &registry, "test:model", "", false, false);
+        let json = serde_json::to_value(meta).unwrap();
+        assert!(json["kage"]["opt"].get("compactionReserveTokens").is_none());
     }
 
     #[test]

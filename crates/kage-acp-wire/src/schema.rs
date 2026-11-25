@@ -376,9 +376,12 @@ pub enum SessionBackground {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionOpt {
-    /// The context fraction a run compacts at.
+    /// The context fraction a run compacts at, unless its reserve triggers earlier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_threshold: Option<f64>,
+    /// Tokens reserved before automatic compaction. Zero disables this trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_reserve_tokens: Option<i64>,
     /// How often a failed provider call retries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_provider_retries: Option<i64>,
@@ -3309,6 +3312,7 @@ mod tests {
                 system_prompt: Some("code carefully".into()),
                 opt: Some(SessionOpt {
                     compaction_threshold: Some(0.5),
+                    compaction_reserve_tokens: Some(8_192),
                     max_provider_retries: Some(2),
                     thinking_level: Some("high".into()),
                 }),
@@ -3325,6 +3329,7 @@ mod tests {
                     "systemPrompt": "code carefully",
                     "opt": {
                         "compactionThreshold": 0.5,
+                        "compactionReserveTokens": 8192,
                         "maxProviderRetries": 2,
                         "thinkingLevel": "high",
                     },
@@ -3332,6 +3337,17 @@ mod tests {
                 }},
             }),
         );
+    }
+
+    #[test]
+    fn session_reserve_override_is_optional_and_keeps_zero() {
+        let legacy: SessionOpt = serde_json::from_value(serde_json::json!({})).unwrap();
+        roundtrip(&legacy, serde_json::json!({}));
+        for reserve in [0, 8_192, u32::MAX] {
+            let value = serde_json::json!({"compactionReserveTokens": reserve});
+            let opt: SessionOpt = serde_json::from_value(value.clone()).unwrap();
+            roundtrip(&opt, value);
+        }
     }
 
     #[test]

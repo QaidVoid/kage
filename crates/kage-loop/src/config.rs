@@ -22,21 +22,28 @@ pub enum SteeringMode {
 ///
 /// Defaults are tuned for interactive use: parallel tools are off because
 /// they magnify blast radius, and compaction kicks in at 80% of the
-/// model's context window. The agent loop has no iteration cap by
-/// default: a runaway agent is bounded by user cancellation, compaction,
-/// and provider quota. Hosts that need a hard bound (autonomous or
-/// unattended runs) can set [`LoopConfig::max_turns`].
+/// model's context window or earlier to preserve reply room. The agent
+/// loop has no iteration cap by default: a runaway agent is bounded by
+/// user cancellation, compaction, and provider quota. Hosts that need a
+/// hard bound (autonomous or unattended runs) can set
+/// [`LoopConfig::max_turns`].
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LoopConfig {
     /// When true, tool calls within a single assistant turn run on
     /// independent threads. Order is preserved in the resulting tool-result
     /// messages.
     pub parallel_tools: bool,
-    /// Trigger compaction once estimated token usage exceeds this fraction
-    /// of the model's context window. Must be in `[0.0, 1.0]`: `0`
-    /// disables compaction entirely, and `1` compacts as soon as usage
-    /// reaches the context window.
+    /// Trigger automatic compaction once estimated token usage reaches this
+    /// fraction of the model's context window. Must be in `[0.0, 1.0]`.
+    /// The reply reserve can trigger compaction earlier. `0` disables all
+    /// automatic compaction, including the reserve trigger.
     pub compaction_threshold: f32,
+    /// Reply tokens to keep free before automatic compaction, capped by
+    /// the model's output limit plus a 2% context margin and half the window.
+    /// Defaults to 50,000. `0` disables only the reserve trigger, leaving
+    /// the fraction threshold active. Does not change request output limits.
+    #[serde(default = "default_compaction_reserve_tokens")]
+    pub compaction_reserve_tokens: u32,
     /// How the loop drains queued steering messages each turn.
     #[serde(default)]
     pub steering_mode: SteeringMode,
@@ -61,6 +68,10 @@ pub struct LoopConfig {
     pub max_turns: Option<u32>,
 }
 
+fn default_compaction_reserve_tokens() -> u32 {
+    50_000
+}
+
 /// Serde default for [`LoopConfig::max_provider_retries`]: an old
 /// config file without the key still gets auto-retry.
 fn default_max_provider_retries() -> u32 {
@@ -72,6 +83,7 @@ impl Default for LoopConfig {
         Self {
             parallel_tools: false,
             compaction_threshold: 0.8,
+            compaction_reserve_tokens: default_compaction_reserve_tokens(),
             steering_mode: SteeringMode::OneAtATime,
             followup_mode: SteeringMode::OneAtATime,
             max_provider_retries: default_max_provider_retries(),
@@ -88,6 +100,7 @@ mod tests {
     fn default_values_are_sane() {
         let cfg = LoopConfig::default();
         assert!(!cfg.parallel_tools);
+        assert_eq!(cfg.compaction_reserve_tokens, 50_000);
         assert!((0.0..=1.0).contains(&cfg.compaction_threshold));
     }
 
@@ -96,6 +109,7 @@ mod tests {
         let cfg = LoopConfig {
             parallel_tools: true,
             compaction_threshold: 0.9,
+            compaction_reserve_tokens: 8_192,
             steering_mode: SteeringMode::All,
             followup_mode: SteeringMode::OneAtATime,
             max_provider_retries: 2,
@@ -106,8 +120,20 @@ mod tests {
         assert_eq!(cfg, back);
         let legacy: LoopConfig =
             serde_json::from_str(r#"{"parallel_tools":false,"compaction_threshold":0.8}"#).unwrap();
+        assert_eq!(legacy.compaction_reserve_tokens, 50_000);
         assert_eq!(legacy.max_provider_retries, 4);
         assert_eq!(legacy.max_turns, None, "the failsafe stays opt-in");
+    }
+
+    #[test]
+    fn explicit_zero_reserve_survives_serde() {
+        let cfg: LoopConfig = serde_json::from_str(
+            r#"{"parallel_tools":false,"compaction_threshold":0.95,"compaction_reserve_tokens":0}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.compaction_reserve_tokens, 0);
+        let back: LoopConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back, cfg);
     }
 
     #[test]

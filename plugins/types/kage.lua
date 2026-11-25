@@ -550,7 +550,8 @@
 ---@field input_max_lines integer Content rows the input box grows to before it scrolls.
 ---@field transcript_on_exit "full"|"last"|"none" What prints after exit: the whole transcript, from the last prompt on, or only the session path and a resume hint.
 ---@field thinking_level ""|"off"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max"|"ultra" Thinking level for new sessions, or empty for auto (high, or the nearest level the model accepts).
----@field compaction_threshold number Fraction of the context window that triggers compaction. 0 turns compaction off.
+---@field compaction_threshold number Fraction of the context window that triggers automatic compaction. The reply reserve can trigger it earlier. 0 disables all automatic compaction, including the reserve trigger.
+---@field compaction_reserve_tokens integer Reply tokens to keep free before automatic compaction, capped by the model output limit plus a 2% context margin and half the window. 0 disables only the reserve trigger. Does not change request output limits.
 ---@field max_provider_retries integer How many times to re-issue a turn whose provider request failed transiently before giving up. 0 disables auto-retry.
 ---@field leader string The key `<leader>` expands to when a mapping is set.
 ---@field timeoutlen integer Milliseconds a mapping that is also a prefix waits for more keys.

@@ -56,13 +56,6 @@ pub(crate) const MAX_OVERFLOW_COMPACTIONS: u32 = 3;
 /// dropped, so a rejected summary call can still succeed smaller.
 const SUMMARIZE_ATTEMPTS: u32 = 3;
 
-/// Output tokens reserved for the model's reply: compaction also
-/// triggers when the live context plus this reserve reaches the
-/// window, so the output ceiling is not squeezed to a short reply.
-/// Capped at what the model can emit, so a small output limit does
-/// not compact early to keep room it can never use.
-const OUTPUT_RESERVE: u64 = 50_000;
-
 /// Smallest reply room a request asks for, on top of any thinking
 /// budget. When the window cannot fit even this, the request goes out
 /// anyway and a provider rejection triggers recovery compaction.
@@ -318,15 +311,14 @@ fn should_compact(cx: &AgentContext, config: LoopConfig) -> bool {
     // Compare the *most recent* turn's full prompt size to the
     // window. Summing per-turn prompts would count history again on
     // every turn, since each prompt carries the entire prior
-    // conversation. The reserve guard trips before the
-    // threshold when the remaining room can no longer hold a full
-    // reply, so a long generation cannot overflow the window.
-    let reply = cx.max_output_tokens.map_or(OUTPUT_RESERVE, u64::from);
-    let reserve = OUTPUT_RESERVE
+    // conversation.
+    let configured_reserve = u64::from(config.compaction_reserve_tokens);
+    let reply = cx.max_output_tokens.map_or(configured_reserve, u64::from);
+    let reserve = configured_reserve
         .min(reply.saturating_add(estimate_margin(cx.context_window)))
         .min(cx.context_window / 2);
     let input = estimate_next_input(cx);
-    input >= threshold || input.saturating_add(reserve) >= cx.context_window
+    input >= threshold || (reserve > 0 && input.saturating_add(reserve) >= cx.context_window)
 }
 
 /// Estimated prompt size of the next request built from `cx`. The last
@@ -745,6 +737,111 @@ mod tests {
             cx.history.push(Arc::new(msg));
         }
         cx
+    }
+
+    fn reserve_context(input: u64) -> AgentContext {
+        let mut cx = loaded_context(input, 4);
+        cx.context_window = 256_000;
+        cx.max_output_tokens = Some(128_000);
+        cx
+    }
+
+    #[test]
+    fn default_reserve_compacts_at_206000_of_256000() {
+        let config = LoopConfig {
+            compaction_threshold: 0.95,
+            ..LoopConfig::default()
+        };
+        assert!(!should_compact(&reserve_context(205_999), config));
+        assert!(should_compact(&reserve_context(206_000), config));
+    }
+
+    #[test]
+    fn reduced_reserve_allows_eighty_percent_and_compacts_at_threshold() {
+        let config = LoopConfig {
+            compaction_threshold: 0.95,
+            compaction_reserve_tokens: 8_192,
+            ..LoopConfig::default()
+        };
+        assert!(!should_compact(&reserve_context(204_800), config));
+        assert!(!should_compact(&reserve_context(206_000), config));
+        assert!(!should_compact(&reserve_context(243_199), config));
+        assert!(should_compact(&reserve_context(243_200), config));
+    }
+
+    #[test]
+    fn reduced_reserve_delays_compaction_until_the_configured_threshold() {
+        let mut cx = loaded_context(206_000, 10);
+        cx.context_window = 256_000;
+        cx.max_output_tokens = Some(128_000);
+        let config = LoopConfig {
+            compaction_threshold: 0.95,
+            compaction_reserve_tokens: 8_192,
+            ..LoopConfig::default()
+        };
+        let provider = MockProvider::replaying(summary_script());
+        let cancel = CancelFlag::new();
+        let mut hooks = NoopHooks;
+        assert!(
+            !maybe_compact(&mut cx, config, &provider, &cancel, &mut hooks, &mut |_| {}).unwrap()
+        );
+        assert_eq!(cx.history.len(), 10);
+        cx.budget.current_context = 243_200;
+        assert!(
+            maybe_compact(&mut cx, config, &provider, &cancel, &mut hooks, &mut |_| {}).unwrap()
+        );
+        assert!(cx.history.len() < 10);
+    }
+
+    #[test]
+    fn zero_reserve_disables_only_the_reserve_trigger() {
+        let config = LoopConfig {
+            compaction_threshold: 0.95,
+            compaction_reserve_tokens: 0,
+            ..LoopConfig::default()
+        };
+        assert!(!should_compact(&reserve_context(206_000), config));
+        assert!(!should_compact(&reserve_context(243_199), config));
+        assert!(should_compact(&reserve_context(243_200), config));
+    }
+
+    #[test]
+    fn zero_threshold_disables_both_automatic_triggers() {
+        for reserve in [0, 8_192, 50_000, u32::MAX] {
+            let config = LoopConfig {
+                compaction_threshold: 0.0,
+                compaction_reserve_tokens: reserve,
+                ..LoopConfig::default()
+            };
+            assert!(!should_compact(&reserve_context(256_000), config));
+        }
+    }
+
+    #[test]
+    fn reserve_is_capped_by_model_output_plus_margin() {
+        let config = LoopConfig {
+            compaction_threshold: 1.0,
+            ..LoopConfig::default()
+        };
+        let mut cx = reserve_context(242_687);
+        cx.max_output_tokens = Some(8_192);
+        assert!(!should_compact(&cx, config));
+        cx.budget.current_context = 242_688;
+        assert!(should_compact(&cx, config));
+    }
+
+    #[test]
+    fn reserve_is_capped_at_half_the_context_window() {
+        let config = LoopConfig {
+            compaction_threshold: 1.0,
+            compaction_reserve_tokens: u32::MAX,
+            ..LoopConfig::default()
+        };
+        let mut cx = reserve_context(19_999);
+        cx.context_window = 40_000;
+        assert!(!should_compact(&cx, config));
+        cx.budget.current_context = 20_000;
+        assert!(should_compact(&cx, config));
     }
 
     #[test]

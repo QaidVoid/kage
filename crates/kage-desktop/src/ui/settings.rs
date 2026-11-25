@@ -944,6 +944,7 @@ fn agents(ui: &mut egui::Ui, store: &Store, palette: &Palette, events: &mut Vec<
             &[
                 ("thinking_level", "Thinking by default"),
                 ("compaction_threshold", "Compact at"),
+                ("compaction_reserve_tokens", "Compaction reserve"),
                 ("max_provider_retries", "Provider retries"),
             ],
         ),
@@ -1114,6 +1115,10 @@ fn stepper(
     let current = option.value.as_f64().unwrap_or(0.0);
     let (step, shown) = match (fraction, option.name.as_str()) {
         (true, _) => (0.05, format!("{}%", (current * 100.0).round())),
+        (false, "compaction_reserve_tokens") => (
+            1_024.0,
+            off_or(current, format!("{} tokens", current as i64)),
+        ),
         (false, "swarm_timeout_ms") => (60_000.0, format!("{} min", current as i64 / 60_000)),
         (false, "agent_max_turns") => (10.0, off_or(current, current.to_string())),
         (false, "agent_timeout") => (

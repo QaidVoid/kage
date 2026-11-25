@@ -121,7 +121,8 @@ value)` is the same as assigning.
 | `input_max_lines` | `ui.input_max_lines` | integer, 1 to 64 | `8` | immediately |
 | `thinking_level` | `ui.thinking_level` | `""`, `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` or `"ultra"` | `""` | next session |
 | `transcript_on_exit` | `ui.transcript_on_exit` | `"full"`, `"last"` or `"none"` | `"full"` | at exit |
-| `compaction_threshold` | `loop.compaction_threshold` | number, 0 to 1 (0 turns compaction off) | `0.8` | next session |
+| `compaction_threshold` | `loop.compaction_threshold` | number, 0 to 1 (0 turns automatic compaction off) | `0.8` | next session |
+| `compaction_reserve_tokens` | `loop.compaction_reserve_tokens` | integer, 0 to 4,294,967,295 (0 disables only the reserve trigger) | `50000` | next session |
 | `max_provider_retries` | `loop.max_provider_retries` | integer, 0 to 10 (0 turns auto-retry off) | `4` | next session |
 | `leader` | `keybindings.leader` | one key, such as `","` or `"<Space>"` | `"\\"` (backslash) | mappings set after it |
 | `timeoutlen` | `keybindings.timeoutlen` | integer milliseconds, 0 to 5000 | `1000` | immediately |
@@ -140,11 +141,17 @@ quit: the whole conversation as plain text, only the part from your
 last prompt on, or nothing. When the session was recorded, the session
 file path and a `kage resume <id>` hint follow.
 
-`thinking_level`, `compaction_threshold` and `max_provider_retries`
-set in `init.lua` apply to
+`thinking_level`, `compaction_threshold`, `compaction_reserve_tokens` and
+`max_provider_retries` set in `init.lua` apply to
 the first session, because kage starts it after `init.lua` has run. An
 empty `thinking_level` means the automatic level: high, or the nearest
 level the model accepts.
+
+`compaction_reserve_tokens` can trigger compaction before
+`compaction_threshold` to preserve output room. Lowering the reserve allows
+more history at the cost of shorter replies near the context limit. See
+[automatic compaction](/guide/config#automatic-compaction) for the trigger
+calculation and an example.
 
 `agent_max_depth` limits how deep [agents](/guide/agents) nest: `1`
 lets only the main session start agents. `agent_max_running` limits

@@ -123,6 +123,14 @@ configured under `[acp.agents]`, to open the session on that agent
 instead of the kage engine. The server refuses an unknown name and a
 request with `mcpServers`. See [external sessions](./acp-client.md#external-sessions).
 
+`session/new` accepts `_meta.kage.opt.compactionReserveTokens` to override
+the session's automatic-compaction reserve, an integer from 0 to
+4,294,967,295. Omission keeps the host's configured reserve, which defaults
+to 50,000 tokens. An explicit `0` disables only the reserve trigger;
+`compactionThreshold` still applies. A positive reserve can trigger
+compaction before that fraction is reached. These fields configure native
+kage sessions, not the compaction policy of external agents.
+
 Media a model produces, such as the images of a model that draws,
 arrive as standard ACP `image` (or `audio`) blocks in
 `agent_message_chunk`, carrying their bytes as base64, between the text

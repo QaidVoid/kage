@@ -153,9 +153,9 @@ impl SessionSettings {
     ///
     /// # Errors
     ///
-    /// `-32602` when a value is out of range: a compaction threshold
-    /// outside the option's bounds, retries outside the option's range,
-    /// or a thinking level that is neither `auto` nor a known level.
+    /// `-32602` when a compaction threshold, reserve, or retry count is
+    /// outside its option's bounds, or a thinking level is neither
+    /// `auto` nor a known level.
     fn of(meta: Option<&NewSessionMeta>, kage_client: bool) -> Result<Self, RpcError> {
         let kage = meta.and_then(|meta| meta.kage.as_ref());
         let defaults = Self::host_defaults(kage_client);
@@ -212,6 +212,9 @@ impl SessionSettings {
                     spec.loop_cfg.compaction_threshold = threshold as f32;
                 }
             }
+            if let Some(reserve) = opt.compaction_reserve_tokens {
+                spec.loop_cfg.compaction_reserve_tokens = u32::try_from(reserve).unwrap_or(0);
+            }
             if let Some(retries) = opt.max_provider_retries {
                 spec.loop_cfg.max_provider_retries = u32::try_from(retries).unwrap_or(0);
             }
@@ -234,6 +237,12 @@ fn validate_opt(opt: &SessionOpt) -> Result<(), RpcError> {
             .map_err(|e| RpcError::internal(e.to_string()))?;
         def.validate(OptionValue::Float(threshold))
             .map_err(|e| invalid(format!("opt.compactionThreshold: {e}")))?;
+    }
+    if let Some(reserve) = opt.compaction_reserve_tokens {
+        let def = kage_core::options::lookup("compaction_reserve_tokens")
+            .map_err(|e| RpcError::internal(e.to_string()))?;
+        def.validate(OptionValue::Int(reserve))
+            .map_err(|e| invalid(format!("opt.compactionReserveTokens: {e}")))?;
     }
     if let Some(retries) = opt.max_provider_retries {
         let def = kage_core::options::lookup("max_provider_retries")

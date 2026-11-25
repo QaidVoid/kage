@@ -1029,6 +1029,16 @@ mod tests {
         assert_eq!(thinking, None);
     }
 
+    #[test]
+    fn compaction_reserve_config_reaches_the_session_without_a_runtime() {
+        for reserve in [0, 24_000, u32::MAX] {
+            let mut config = Config::default();
+            config.loop_settings.compaction_reserve_tokens = reserve;
+            let (loop_cfg, _) = project_options(None, &config);
+            assert_eq!(loop_cfg.compaction_reserve_tokens, reserve);
+        }
+    }
+
     /// A host with no plugins and a plain session spec on the mock.
     fn host_in(dir: &tempfile::TempDir) -> Arc<Host> {
         let registry =

@@ -328,6 +328,12 @@ pub(crate) fn startup_options(
             loop_cfg.compaction_threshold = threshold as f32;
         }
     }
+    if let Some(reserve) = store
+        .get("compaction_reserve_tokens")
+        .and_then(OptionValue::as_int)
+    {
+        loop_cfg.compaction_reserve_tokens = u32::try_from(reserve).unwrap_or(0);
+    }
     if let Some(retries) = store
         .get("max_provider_retries")
         .and_then(OptionValue::as_int)

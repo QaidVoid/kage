@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Features
+
+- Configure early-compaction headroom independently with
+  `loop.compaction_reserve_tokens`. The default remains 50,000 tokens.
+  `0` disables the reserve trigger without disabling the context threshold.
+
 ### Upgrade Notes
 
 - Native sessions retain per-attempt cost estimates on reopen, including

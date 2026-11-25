@@ -8761,6 +8761,7 @@ fn session_meta_settings_reach_the_spec() {
             system_prompt: Some("be terse".into()),
             opt: Some(SessionOpt {
                 compaction_threshold: Some(0.5),
+                compaction_reserve_tokens: Some(12_000),
                 max_provider_retries: Some(2),
                 thinking_level: Some("high".into()),
             }),
@@ -8775,11 +8776,45 @@ fn session_meta_settings_reach_the_spec() {
     settings.apply(&mut spec);
     assert_eq!(spec.gate.mode(), Some(PermissionAction::Allow));
     assert!((spec.loop_cfg.compaction_threshold - 0.5).abs() < f32::EPSILON);
+    assert_eq!(spec.loop_cfg.compaction_reserve_tokens, 12_000);
     assert_eq!(spec.loop_cfg.max_provider_retries, 2);
     assert_eq!(spec.cx.thinking_level, Some(ThinkingLevel::High));
     assert_eq!(spec.cx.max_output_tokens, Some(1_024));
     let agents = spec.agents.unwrap();
     assert_eq!(agents.background, Background::Wake);
+}
+
+#[test]
+fn omitted_compaction_reserve_keeps_the_host_value() {
+    let meta: NewSessionMeta = serde_json::from_value(serde_json::json!({
+        "kage": { "opt": { "compactionThreshold": 0.5 } }
+    }))
+    .unwrap();
+    let mut spec = default_spec();
+    spec.loop_cfg.compaction_reserve_tokens = 24_000;
+    SessionSettings::of(Some(&meta), false)
+        .unwrap()
+        .apply(&mut spec);
+    assert_eq!(spec.loop_cfg.compaction_reserve_tokens, 24_000);
+    assert!((spec.loop_cfg.compaction_threshold - 0.5).abs() < f32::EPSILON);
+}
+
+#[test]
+fn explicit_compaction_reserve_preserves_zero_and_the_upper_bound() {
+    for reserve in [0, u32::MAX] {
+        let meta: NewSessionMeta = serde_json::from_value(serde_json::json!({
+            "kage": { "opt": { "compactionReserveTokens": reserve } }
+        }))
+        .unwrap();
+        let mut spec = default_spec();
+        spec.loop_cfg.compaction_reserve_tokens = 24_000;
+        let threshold = spec.loop_cfg.compaction_threshold;
+        SessionSettings::of(Some(&meta), false)
+            .unwrap()
+            .apply(&mut spec);
+        assert_eq!(spec.loop_cfg.compaction_reserve_tokens, reserve);
+        assert!((spec.loop_cfg.compaction_threshold - threshold).abs() < f32::EPSILON);
+    }
 }
 
 #[test]
@@ -8885,6 +8920,8 @@ fn out_of_range_session_opts_are_invalid_params() {
     for opt in [
         serde_json::json!({ "compactionThreshold": 1.5 }),
         serde_json::json!({ "compactionThreshold": -0.1 }),
+        serde_json::json!({ "compactionReserveTokens": -1 }),
+        serde_json::json!({ "compactionReserveTokens": i64::from(u32::MAX) + 1 }),
         serde_json::json!({ "maxProviderRetries": -1 }),
         serde_json::json!({ "maxProviderRetries": 11 }),
         serde_json::json!({ "thinkingLevel": "bogus" }),
@@ -8899,6 +8936,8 @@ fn in_range_session_opts_are_accepted() {
     for opt in [
         serde_json::json!({ "compactionThreshold": 0.0, "maxProviderRetries": 0 }),
         serde_json::json!({ "compactionThreshold": 1.0, "maxProviderRetries": 10 }),
+        serde_json::json!({ "compactionReserveTokens": 0 }),
+        serde_json::json!({ "compactionReserveTokens": u32::MAX }),
         serde_json::json!({ "thinkingLevel": "auto" }),
         serde_json::json!({ "thinkingLevel": "default" }),
     ] {

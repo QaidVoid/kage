@@ -171,7 +171,18 @@ pub const OPTIONS: &[OptionDef] = &[
         name: "compaction_threshold",
         toml: "loop.compaction_threshold",
         kind: OptionKind::Fraction { default: 0.8 },
-        doc: "Fraction of the context window that triggers compaction. 0 turns compaction off.",
+        doc: "Fraction of the context window that triggers automatic compaction. The reply reserve can trigger it earlier. 0 disables all automatic compaction, including the reserve trigger.",
+        live: false,
+    },
+    OptionDef {
+        name: "compaction_reserve_tokens",
+        toml: "loop.compaction_reserve_tokens",
+        kind: OptionKind::Int {
+            min: 0,
+            max: u32::MAX as i64,
+            default: 50_000,
+        },
+        doc: "Reply tokens to keep free before automatic compaction, capped by the model output limit plus a 2% context margin and half the window. 0 disables only the reserve trigger. Does not change request output limits.",
         live: false,
     },
     OptionDef {
@@ -650,6 +661,9 @@ fn config_value(name: &str, config: &Config) -> Option<OptionValue> {
         "compaction_threshold" => {
             OptionValue::Float(widen(config.loop_settings.compaction_threshold))
         }
+        "compaction_reserve_tokens" => {
+            OptionValue::Int(i64::from(config.loop_settings.compaction_reserve_tokens))
+        }
         "max_provider_retries" => {
             OptionValue::Int(i64::from(config.loop_settings.max_provider_retries))
         }
@@ -785,6 +799,7 @@ mod tests {
                 OptionValue::Str("high".into()),
             ),
             ("compaction_threshold", "0.6", OptionValue::Float(0.6)),
+            ("compaction_reserve_tokens", "8192", OptionValue::Int(8_192)),
             ("max_provider_retries", "7", OptionValue::Int(7)),
             ("leader", "\"<Space>\"", OptionValue::Str("<Space>".into())),
             ("timeoutlen", "300", OptionValue::Int(300)),
@@ -994,6 +1009,35 @@ mod tests {
             store.get("compaction_threshold"),
             Some(&OptionValue::Float(0.0))
         );
+    }
+
+    #[test]
+    fn compaction_reserve_validates_u32_bounds_and_is_not_live() {
+        let def = find("compaction_reserve_tokens").unwrap();
+        assert_eq!(def.toml, "loop.compaction_reserve_tokens");
+        assert!(!def.live);
+        let mut store = OptionStore::default();
+        assert_eq!(store.get(def.name), Some(&OptionValue::Int(50_000)));
+        for reserve in [0, 8_192, i64::from(u32::MAX)] {
+            let change = store
+                .set(def.name, OptionValue::Int(reserve), OptionSource::Lua)
+                .unwrap();
+            assert_eq!(change.new, OptionValue::Int(reserve));
+            assert_eq!(store.get(def.name), Some(&OptionValue::Int(reserve)));
+            let cfg = load(&format!("[loop]\ncompaction_reserve_tokens = {reserve}\n"));
+            let (store, errors) = OptionStore::from_config(&cfg);
+            assert!(errors.is_empty(), "{errors:?}");
+            assert_eq!(store.get(def.name), Some(&OptionValue::Int(reserve)));
+            assert_eq!(store.source(def.name), Some(OptionSource::Toml));
+        }
+        for reserve in [-1, i64::from(u32::MAX) + 1] {
+            assert!(
+                store
+                    .set(def.name, OptionValue::Int(reserve), OptionSource::Lua)
+                    .is_err()
+            );
+        }
+        assert!(def.validate(OptionValue::Float(8_192.5)).is_err());
     }
 
     #[test]

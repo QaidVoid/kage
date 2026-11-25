@@ -24,9 +24,10 @@ use std::sync::Arc;
 
 use kage_core::SessionId;
 use kage_core::environment::Environment;
+use kage_core::sync::lock;
 use serde_json::Value;
 
-use crate::api::SharedHostLog;
+use crate::api::{LogLevel, SharedHostLog};
 use crate::error::PluginError;
 use crate::messages::PendingMessage;
 use crate::runtime::PluginRuntime;
@@ -140,7 +141,10 @@ impl SessionPlugins for PluginRuntime {
         match self.discover_resources() {
             Ok(entries) => entries.skills,
             Err(err) => {
-                eprintln!("kage: resources_discover dispatch failed: {err}");
+                lock(&self.sink()).log(
+                    LogLevel::Error,
+                    &format!("resources_discover dispatch failed: {err}"),
+                );
                 Vec::new()
             }
         }
@@ -164,5 +168,108 @@ impl SessionPlugins for PluginRuntime {
 
     fn sink(&self) -> SharedHostLog {
         PluginRuntime::sink(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    use crate::api::LogLevel;
+    use crate::host::LuaHost;
+    use crate::testing::runtime_with_recording;
+
+    use super::*;
+
+    #[test]
+    fn skill_dirs_logs_handler_errors_once_and_keeps_valid_resources() {
+        let (recording, runtime) = runtime_with_recording(PathBuf::from("."));
+        runtime
+            .eval_plugin(
+                "broken",
+                "kage.on('resources_discover', function() error('resource-handler-marker') end)",
+            )
+            .unwrap();
+        runtime
+            .eval_plugin(
+                "working",
+                "kage.on('resources_discover', function() return { skills = {'extra-skills'} } end)",
+            )
+            .unwrap();
+
+        assert_eq!(runtime.skill_dirs(), [PathBuf::from("extra-skills")]);
+        let output = recording.snapshot();
+        assert!(output.notifications.is_empty());
+        assert_eq!(output.logs.len(), 1, "{:?}", output.logs);
+        assert_eq!(output.logs[0].0, LogLevel::Error);
+        assert!(output.logs[0].1.contains("resources_discover"));
+        assert!(output.logs[0].1.contains("resource-handler-marker"));
+    }
+
+    #[test]
+    fn skill_dirs_logs_disconnected_owner_once_and_returns_empty() {
+        let (recording, mut runtime) = runtime_with_recording(PathBuf::from("."));
+        runtime
+            .eval_plugin(
+                "working",
+                "kage.on('resources_discover', function() return { skills = {'extra-skills'} } end)",
+            )
+            .unwrap();
+        assert_eq!(runtime.handler_count("resources_discover"), 1);
+        let (host, owner) = LuaHost::new();
+        drop(owner);
+        runtime.host = host;
+
+        assert!(runtime.skill_dirs().is_empty());
+        let output = recording.snapshot();
+        assert!(output.notifications.is_empty());
+        assert_eq!(output.logs.len(), 1, "{:?}", output.logs);
+        assert_eq!(output.logs[0].0, LogLevel::Error);
+        assert!(
+            output.logs[0]
+                .1
+                .contains("resources_discover dispatch failed")
+        );
+        assert!(output.logs[0].1.contains("the Lua owner thread is gone"));
+    }
+
+    #[test]
+    fn skill_dirs_diagnostics_stay_off_stdio_with_configured_sink() {
+        const CHILD: &str = "KAGE_RESOURCE_SINK_REGRESSION_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            skill_dirs_logs_handler_errors_once_and_keeps_valid_resources();
+            skill_dirs_logs_disconnected_owner_once_and_returns_empty();
+            return;
+        }
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "session_plugins::tests::skill_dirs_diagnostics_stay_off_stdio_with_configured_sink",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        for marker in [
+            "resource-handler-marker",
+            "resources_discover dispatch failed",
+        ] {
+            for bytes in [&output.stdout, &output.stderr] {
+                assert!(
+                    !bytes
+                        .windows(marker.len())
+                        .any(|part| part == marker.as_bytes()),
+                    "diagnostic leaked: {}",
+                    String::from_utf8_lossy(bytes),
+                );
+            }
+        }
     }
 }

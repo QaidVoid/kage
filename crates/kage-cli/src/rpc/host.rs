@@ -20,7 +20,9 @@ use kage_core::protocol::{
 use kage_core::sync::lock;
 use kage_jsonrpc::RpcError;
 use kage_loop::{AgentContext, LoopConfig};
-use kage_plugin::{PluginRuntime, session_plugins::SessionPlugins};
+use kage_plugin::{
+    LogLevel, PluginRuntime, SharedHostLog, default_host_log, session_plugins::SessionPlugins,
+};
 use kage_provider::ProviderRegistry;
 
 use super::options::{Settings, choice};
@@ -169,6 +171,7 @@ pub(crate) struct Host {
     projects: OnceLock<Arc<Projects>>,
     /// The system prompt role sessions start with.
     system_role: Mutex<String>,
+    sink: SharedHostLog,
 }
 
 impl Host {
@@ -182,8 +185,24 @@ impl Host {
         system_role: &str,
         yolo: bool,
     ) -> Result<Arc<Self>, String> {
-        let mut registry = crate::build_provider_registry()?;
-        merge_plugin_providers(&mut registry, model_override, system_role);
+        Self::start_with_log(model_override, system_role, yolo, default_host_log())
+    }
+
+    /// Starts a host whose plugin runtimes and diagnostics use `sink`,
+    /// including provider reloads and project sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when providers cannot be configured, the selected
+    /// model cannot be resolved, or the sessions directory cannot be found.
+    pub(crate) fn start_with_log(
+        model_override: Option<&str>,
+        system_role: &str,
+        yolo: bool,
+        sink: SharedHostLog,
+    ) -> Result<Arc<Self>, String> {
+        let mut registry = crate::providers::build_provider_registry_with_log(&sink)?;
+        merge_plugin_providers(&mut registry, model_override, system_role, &sink);
         let default_model =
             model_override.map_or_else(|| crate::default_model(&registry), str::to_owned);
         if crate::has_usable_provider(&registry) {
@@ -195,13 +214,14 @@ impl Host {
             // client connects, saves a key through `_kage/auth/set`,
             // and the reloaded providers resolve. Terminal users get
             // the hint here; runs fail with the same hint per prompt.
-            eprintln!(
-                "kage: no provider credentials found; add one with `kage auth login` or an API-key env var"
+            lock(&sink).log(
+                LogLevel::Warn,
+                "no provider credentials found; add one with `kage auth login` or an API-key env var",
             );
         }
         let sessions = crate::sessions_dir()?;
         let registry = Arc::new(registry);
-        let projects = Arc::new(Projects::default());
+        let projects = Arc::new(Projects::with_log(Arc::clone(&sink)));
         let spec: SpecBuilder = {
             let system_role = system_role.to_owned();
             let projects = Arc::clone(&projects);
@@ -233,7 +253,7 @@ impl Host {
                 },
             )
         };
-        let host = Self::new(registry, default_model, sessions, spec);
+        let host = Self::new_with_log(registry, default_model, sessions, spec, sink);
         *lock(&host.model_override) = model_override.map(str::to_owned);
         let _ = host.projects.set(projects);
         system_role.clone_into(&mut lock(&host.system_role));
@@ -263,7 +283,10 @@ impl Host {
                 }
             });
         if let Err(e) = spawned {
-            eprintln!("kage: cannot watch the configuration: {e}");
+            lock(&self.sink).log(
+                LogLevel::Warn,
+                &format!("cannot watch the configuration: {e}"),
+            );
         }
     }
 
@@ -297,7 +320,9 @@ impl Host {
                         self.fetch_missing_lists();
                     }
                 }
-                Err(e) => eprintln!("kage: providers not reloaded: {e}"),
+                Err(e) => {
+                    self.log(LogLevel::Error, &format!("providers not reloaded: {e}"));
+                }
             }
         }
         let sessions: Vec<(SessionId, PathBuf)> = lock(&self.workdirs)
@@ -318,16 +343,28 @@ impl Host {
 
     /// The engine and shared setup every connection works through. The
     /// model list follows `registry`.
+    #[cfg(test)]
     pub(crate) fn new(
         registry: Arc<ProviderRegistry>,
         default_model: String,
         sessions: PathBuf,
         spec: SpecBuilder,
     ) -> Arc<Self> {
+        Self::new_with_log(registry, default_model, sessions, spec, default_host_log())
+    }
+
+    fn new_with_log(
+        registry: Arc<ProviderRegistry>,
+        default_model: String,
+        sessions: PathBuf,
+        spec: SpecBuilder,
+        sink: SharedHostLog,
+    ) -> Arc<Self> {
         let models = model_choices(&registry);
         let engine = Engine::start(Arc::clone(&registry));
         let live = Arc::new(Mutex::new(Live::new(engine.commander())));
         let host = Arc::new(Self {
+            sink,
             engine,
             external: Mutex::default(),
             lifecycles: super::external::Lifecycles::new(super::external::MAX_SESSIONS),
@@ -405,6 +442,16 @@ impl Host {
             .expect("the host prune thread");
     }
 
+    /// The sink shared by the host's runtimes and background diagnostics.
+    pub(super) fn sink(&self) -> SharedHostLog {
+        Arc::clone(&self.sink)
+    }
+
+    /// Records a diagnostic through the host's configured sink.
+    pub(super) fn log(&self, level: LogLevel, message: &str) {
+        lock(&self.sink).log(level, message);
+    }
+
     /// The providers, model choices, and default from the same reload.
     pub(crate) fn providers(&self) -> Arc<ProviderSnapshot> {
         Arc::clone(
@@ -438,12 +485,13 @@ impl Host {
     /// Rebuilds configured and Lua providers without fetching model lists.
     pub(crate) fn reload_providers(&self) -> Result<(), String> {
         let _reloading = lock(&self.reloading);
-        let mut registry = crate::build_provider_registry()?;
+        let mut registry = crate::providers::build_provider_registry_with_log(&self.sink)?;
         let model_override = lock(&self.model_override);
         merge_plugin_providers(
             &mut registry,
             model_override.as_deref(),
             &lock(&self.system_role),
+            &self.sink,
         );
         let default_model = model_override
             .as_deref()
@@ -811,18 +859,25 @@ fn merge_plugin_providers(
     registry: &mut ProviderRegistry,
     model_override: Option<&str>,
     system_role: &str,
+    sink: &SharedHostLog,
 ) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let model = model_override.map_or_else(|| crate::default_model(registry), str::to_owned);
     let bare = crate::runtime_env::build_system_prompt(system_role, &cwd, &model, &[], None);
-    let Some(project) =
-        Projects::default().get(&cwd, &model, &|| bare.clone(), &Environment::inherit())
-    else {
+    let Some(project) = Projects::with_log(Arc::clone(sink)).get(
+        &cwd,
+        &model,
+        &|| bare.clone(),
+        &Environment::inherit(),
+    ) else {
         crate::acp_glue::set_runtime(None);
         return;
     };
     for id in crate::plugins::merge_plugin_providers(&project.runtime, registry) {
-        eprintln!("kage: plugin provider `{id}` shadows the built-in registration");
+        lock(sink).log(
+            LogLevel::Warn,
+            &format!("plugin provider `{id}` shadows the built-in registration"),
+        );
     }
     crate::acp_glue::set_runtime(Some(&project.runtime));
 }
@@ -902,7 +957,8 @@ fn session_spec(
     } else {
         PathBuf::from(cwd)
     };
-    crate::trust::warn_if_untrusted(&workdir);
+    let sink = projects.sink();
+    crate::trust::warn_if_untrusted_with_log(&workdir, sink);
     let config = Config::load_layered(&workdir).map_err(|e| RpcError::internal(e.to_string()))?;
     let model = model.to_owned();
     // The client's own role replaces the host's; what the host adds to
@@ -927,7 +983,7 @@ fn session_spec(
         Some,
     );
     let skills = kage_plugin::Invocation::session(id)
-        .scope(|| crate::load_skills(&workdir, session_plugins.as_deref()));
+        .scope(|| crate::load_skills_with_log(&workdir, session_plugins.as_deref(), sink));
     let shell = config
         .shell
         .program
@@ -940,13 +996,13 @@ fn session_spec(
         &skills,
         shell.as_deref(),
     );
-    let tools =
-        kage_tools::configured_registry(&config.tools, &config.shell).with_media_tools(&config);
+    let tools = kage_tools::configured_registry(&config.tools, &config.shell)
+        .with_media_tools_log(&config, sink);
     let aliases = tools.alias_map();
-    let mcp = crate::mcp::unstarted_with(&workdir, concrete.as_deref(), servers, env.clone());
+    let mcp = crate::mcp::unstarted_with(&workdir, concrete.as_deref(), servers, env.clone(), sink);
     let (defs, agent_errors) = crate::agents::load(&workdir);
     for err in agent_errors {
-        eprintln!("kage: {err}");
+        lock(sink).log(LogLevel::Warn, &err);
     }
     let agents = AgentSetup::from_config(defs, &config, Background::Hold);
     config
@@ -967,8 +1023,9 @@ fn session_spec(
         cx = cx.with_confine_paths();
     } else {
         cx = cx.without_confine_paths();
-        eprintln!(
-            "kage: path confinement is OFF for this session (permissions.confine_paths = false)"
+        lock(sink).log(
+            LogLevel::Warn,
+            "path confinement is OFF for this session (permissions.confine_paths = false)",
         );
     }
     if let Some(window) = crate::runtime_env::context_window_for(registry, &model) {
@@ -982,6 +1039,7 @@ fn session_spec(
         recorder: None,
         tools,
         gate: PermissionGate::new(config.permissions)
+            .with_log(Arc::clone(sink))
             .with_fallback(PermissionAction::Ask)
             .with_aliases(aliases)
             .with_mcp_servers(mcp.server_names().map(str::to_owned).collect()),
@@ -1010,6 +1068,190 @@ mod tests {
     use super::*;
 
     const WAIT: Duration = Duration::from_secs(5);
+
+    #[derive(Clone, Default)]
+    struct RecordedLog(Arc<Mutex<Vec<(LogLevel, String)>>>);
+
+    impl kage_plugin::HostLog for RecordedLog {
+        fn notify(&mut self, message: &str) {
+            self.log(LogLevel::Info, message);
+        }
+
+        fn log(&mut self, level: LogLevel, message: &str) {
+            lock(&self.0).push((level, message.to_owned()));
+        }
+    }
+
+    impl RecordedLog {
+        fn sink(&self) -> SharedHostLog {
+            Arc::new(Mutex::new(Box::new(self.clone())))
+        }
+
+        fn count(&self, text: &str) -> usize {
+            lock(&self.0)
+                .iter()
+                .filter(|(_, message)| message.contains(text))
+                .count()
+        }
+    }
+
+    fn isolated_log_test(name: &str) -> bool {
+        if std::env::var("KAGE_HOST_LOG_TEST").as_deref() == Ok(name) {
+            return false;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", dir.path())
+            .env("XDG_CONFIG_HOME", dir.path().join("config"))
+            .env("XDG_DATA_HOME", dir.path().join("data"))
+            .env("XDG_STATE_HOME", dir.path().join("state"))
+            .env("XDG_CACHE_HOME", dir.path().join("cache"))
+            .env("KAGE_HOST_LOG_TEST", name)
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        assert!(
+            output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("lua-print-marker"));
+        true
+    }
+
+    #[test]
+    fn injected_log_covers_provider_and_project_runtime_reloads() {
+        if isolated_log_test(
+            "rpc::host::tests::injected_log_covers_provider_and_project_runtime_reloads",
+        ) {
+            return;
+        }
+        let config_dir = crate::config_dir().unwrap();
+        let plugins = config_dir.join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let config_path = config_dir.join("config.toml");
+        std::fs::write(
+            &config_path,
+            "[plugins]\ndisabled = ['skip']\n[loop]\nmax_provider_retries = 100\n\
+             [providers.custom.deepseek]\nbase_url = 'http://127.0.0.1:1/v1'\napi_key_env = ''\n\
+             [[providers.custom.deepseek.models]]\nid = 'local'\n",
+        )
+        .unwrap();
+        std::fs::write(plugins.join("broken.lua"), "error('broken-plugin-marker')").unwrap();
+        std::fs::write(plugins.join("skip.lua"), "error('must-not-run')").unwrap();
+        std::fs::write(
+            config_dir.join("init.lua"),
+            "kage.notify('runtime-load-marker')\nprint('lua-print-marker')\n\
+             kage.register_provider({ id = 'acp', display_name = 'Test', models = {{ id = 'test' }}, \
+             stream = function() return {} end })",
+        ).unwrap();
+        let log = RecordedLog::default();
+        let host = Host::start_with_log(Some("acp/test"), "test", false, log.sink()).unwrap();
+        assert_eq!(log.count("replaces the catalog provider"), 1);
+        assert_eq!(log.count("runtime-load-marker"), 1);
+        assert_eq!(log.count("lua-print-marker"), 1);
+        assert!(log.count("broken-plugin-marker") > 0);
+        assert!(log.count("skip") > 0);
+        assert!(log.count("max_provider_retries") > 0);
+        assert_eq!(log.count("shadows the built-in registration"), 1);
+        host.reload_providers().unwrap();
+        host.reload_providers().unwrap();
+        assert_eq!(log.count("replaces the catalog provider"), 1);
+        assert_eq!(log.count("runtime-load-marker"), 3);
+        assert_eq!(log.count("shadows the built-in registration"), 3);
+        let workdir = std::env::current_dir().unwrap();
+        let open = || {
+            (host.spec)(
+                &host.registry(),
+                SessionId::new(),
+                workdir.to_str().unwrap(),
+                "acp/test",
+                BTreeMap::new(),
+                &Environment::inherit(),
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let (_, first) = open();
+        let (_, cached) = open();
+        assert!(Arc::ptr_eq(
+            first.as_ref().unwrap(),
+            cached.as_ref().unwrap()
+        ));
+        assert_eq!(log.count("runtime-load-marker"), 4);
+        std::fs::write(
+            plugins.join("broken.lua"),
+            "error('changed-broken-plugin-marker')",
+        )
+        .unwrap();
+        thread::sleep(Duration::from_millis(1100));
+        let (_, fresh) = open();
+        assert!(!Arc::ptr_eq(
+            first.as_ref().unwrap(),
+            fresh.as_ref().unwrap()
+        ));
+        assert_eq!(log.count("runtime-load-marker"), 5);
+        assert!(log.count("changed-broken-plugin-marker") > 0);
+        std::fs::write(&config_path, "[broken").unwrap();
+        host.config_changed(&[config_path]);
+        assert!(log.count("providers not reloaded") > 0);
+        host.shutdown();
+    }
+
+    #[test]
+    fn injected_log_covers_missing_credentials_and_runtime_fallback_errors() {
+        if isolated_log_test(
+            "rpc::host::tests::injected_log_covers_missing_credentials_and_runtime_fallback_errors",
+        ) {
+            return;
+        }
+        let log = RecordedLog::default();
+        let host = Host::start_with_log(None, "test", false, log.sink()).unwrap();
+        assert_eq!(log.count("no provider credentials found"), 1);
+        host.shutdown();
+        drop(host);
+        let config_dir = crate::config_dir().unwrap();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("config.toml"), "[broken").unwrap();
+        std::fs::write(config_dir.join("init.lua"), "error('init-error-marker')").unwrap();
+        std::fs::write(config_dir.join("plugins"), "not a directory").unwrap();
+        let projects = Projects::with_log(log.sink());
+        let workdir = std::env::current_dir().unwrap();
+        for _ in 0..2 {
+            assert!(
+                projects
+                    .get(&workdir, "acp/test", &String::new, &Environment::inherit())
+                    .is_none()
+            );
+        }
+        assert_eq!(log.count("loading with the defaults"), 2);
+        assert_eq!(log.count("plugin load:"), 2);
+        std::fs::remove_file(config_dir.join("plugins")).unwrap();
+        std::fs::create_dir(config_dir.join("plugins")).unwrap();
+        let project = projects
+            .get(&workdir, "acp/test", &String::new, &Environment::inherit())
+            .unwrap();
+        assert!(Arc::ptr_eq(&project.runtime.sink(), projects.sink()));
+        assert_eq!(log.count("loading with the defaults"), 3);
+        assert!(log.count("init-error-marker") > 0);
+        assert!(
+            lock(&log.0)
+                .iter()
+                .any(|(level, message)| *level == LogLevel::Error
+                    && message.contains("plugin load:"))
+        );
+    }
 
     #[test]
     fn an_out_of_range_loop_config_keeps_its_default_without_a_runtime() {

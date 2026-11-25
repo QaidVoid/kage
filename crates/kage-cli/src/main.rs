@@ -1527,6 +1527,15 @@ pub(crate) fn load_skills(
     workdir: &std::path::Path,
     plugins: Option<&dyn kage_plugin::session_plugins::SessionPlugins>,
 ) -> Vec<kage_core::Skill> {
+    load_skills_with_log(workdir, plugins, &kage_plugin::default_host_log())
+}
+
+/// Discover skills and report invalid definitions through `sink`.
+pub(crate) fn load_skills_with_log(
+    workdir: &std::path::Path,
+    plugins: Option<&dyn kage_plugin::session_plugins::SessionPlugins>,
+    sink: &kage_plugin::SharedHostLog,
+) -> Vec<kage_core::Skill> {
     let mut out: std::collections::BTreeMap<String, kage_core::Skill> =
         std::collections::BTreeMap::new();
     let mut search: Vec<std::path::PathBuf> = Vec::new();
@@ -1549,7 +1558,10 @@ pub(crate) fn load_skills(
                 Ok(skill) => {
                     out.insert(skill.name.clone(), skill);
                 }
-                Err(err) => eprintln!("kage: skill load error: {err}"),
+                Err(err) => kage_core::sync::lock(sink).log(
+                    kage_plugin::LogLevel::Error,
+                    &format!("skill load error: {err}"),
+                ),
             }
         }
     }
@@ -1878,6 +1890,67 @@ mod tests {
         let page = render_manpage(&manpage_command()).unwrap();
         std::fs::write(&out, &page).unwrap();
         assert_eq!(run_gen_manpage(&out, true), ExitCode::SUCCESS, "current");
+    }
+
+    #[test]
+    #[expect(
+        clippy::result_large_err,
+        reason = "figment's jail uses its error type"
+    )]
+    fn skill_and_trust_diagnostics_use_the_ui_sink() {
+        figment::Jail::expect_with(|jail| {
+            let root = jail.directory().to_path_buf();
+            for (key, dir) in [
+                ("HOME", "home"),
+                ("XDG_CONFIG_HOME", "config"),
+                ("XDG_STATE_HOME", "state"),
+            ] {
+                jail.set_env(key, root.join(dir).to_string_lossy().as_ref());
+            }
+            let skills = root.join("config/kage/skills");
+            std::fs::create_dir_all(skills.join("valid")).unwrap();
+            std::fs::create_dir_all(skills.join("broken")).unwrap();
+            std::fs::write(
+                skills.join("valid/SKILL.md"),
+                "---\ndescription: Valid skill\n---\nBody.",
+            )
+            .unwrap();
+            std::fs::write(
+                skills.join("broken/SKILL.md"),
+                "---\nname: mismatched\n---\nInvalid skill.",
+            )
+            .unwrap();
+            let project = root.join("project");
+            std::fs::create_dir_all(project.join(".kage")).unwrap();
+            std::fs::write(
+                project.join(".kage/config.toml"),
+                "[permissions]\nconfine_paths = false\n",
+            )
+            .unwrap();
+            let buffer = kage_tui::events::shared_buffer();
+            let sink = kage_tui::hostlog::buffer_host_log(
+                buffer.clone(),
+                kage_tui::toast::shared_toasts(),
+                std::sync::Arc::default(),
+            );
+            let loaded = load_skills_with_log(&project, None, &sink);
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(loaded[0].name, "valid");
+            crate::trust::warn_if_untrusted_with_log(&project, &sink);
+            let buffer = kage_core::sync::lock(&buffer);
+            assert_eq!(buffer.blocks().len(), 2);
+            assert!(matches!(
+                buffer.blocks()[0].as_ref(),
+                kage_tui::buffer::Block::Custom { kind, text, .. }
+                    if kind == "kage:error" && text.contains("skill load error:")
+            ));
+            assert!(matches!(
+                buffer.blocks()[1].as_ref(),
+                kage_tui::buffer::Block::Custom { text, .. }
+                    if text.contains("[Warn] ignoring untrusted")
+            ));
+            Ok(())
+        });
     }
 
     #[test]

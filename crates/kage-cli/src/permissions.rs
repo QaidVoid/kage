@@ -30,6 +30,7 @@ use kage_core::protocol::{ASK_USER_QUESTION_TOOL, EXIT_PLAN_TOOL, PermissionDeci
 use kage_core::sync::lock;
 use kage_core::{CancelFlag, Risk, ToolCallId, ToolOutput};
 use kage_loop::Hooks;
+use kage_plugin::{LogLevel, SharedHostLog, default_host_log};
 
 /// A tool call waiting for an interactive decision.
 pub(crate) struct PermissionPrompt {
@@ -90,6 +91,7 @@ pub(crate) struct PermissionGate {
     /// production construction) resolves [`Config::default_path`] at
     /// write time; tests point it at a tempdir.
     config_path: Option<PathBuf>,
+    sink: SharedHostLog,
 }
 
 impl PermissionGate {
@@ -112,7 +114,16 @@ impl PermissionGate {
             plan: Arc::new(Mutex::new(false)),
             risks: Arc::new(Mutex::new(BTreeMap::new())),
             config_path: None,
+            sink: default_host_log(),
         }
+    }
+
+    /// Route persistence warnings through `sink` instead of stderr.
+    /// Clones and child gates retain the same sink.
+    #[must_use]
+    pub(crate) fn with_log(mut self, sink: SharedHostLog) -> Self {
+        self.sink = sink;
+        self
     }
 
     /// Turn plan mode on or off. Shared across every clone.
@@ -330,8 +341,8 @@ impl PermissionGate {
     /// every clone stops asking, then persist the decision into the
     /// user config file. The user file (not the layered config) is
     /// the destination so project and env layers are not baked in.
-    /// IO failures only eprintln: the in-memory flip already holds
-    /// for this session.
+    /// IO failures only warn through the host log: the in-memory flip
+    /// already holds for this session.
     fn persist_allow_always(&self, tool: &str) {
         let server = self.mcp_server_of(tool).map(str::to_owned);
         let path = match &self.config_path {
@@ -339,7 +350,10 @@ impl PermissionGate {
             None => Config::default_path(),
         };
         let Some(path) = path else {
-            eprintln!("kage: persist permission: no home directory; not persisted");
+            lock(&self.sink).log(
+                LogLevel::Warn,
+                "persist permission: no home directory; not persisted",
+            );
             return;
         };
         if let Some(server) = server {
@@ -347,7 +361,7 @@ impl PermissionGate {
                 .mcp
                 .insert(server.clone(), PermissionAction::Allow);
             if let Err(e) = save_mcp_allow_always(&path, &server) {
-                eprintln!("kage: persist permission: {e}");
+                lock(&self.sink).log(LogLevel::Warn, &format!("persist permission: {e}"));
             }
             return;
         }
@@ -357,7 +371,7 @@ impl PermissionGate {
             .or_default()
             .default = PermissionAction::Allow;
         if let Err(e) = save_allow_always(&path, tool) {
-            eprintln!("kage: persist permission: {e}");
+            lock(&self.sink).log(LogLevel::Warn, &format!("persist permission: {e}"));
         }
     }
 }
@@ -368,7 +382,7 @@ impl PermissionGate {
 ///
 /// # Errors
 ///
-/// A string describing the save failure, for the caller's eprintln.
+/// A string describing the save failure, for the caller's warning.
 fn save_allow_always(path: &Path, tool: &str) -> Result<(), String> {
     Config::save_keys(
         path,
@@ -385,7 +399,7 @@ fn save_allow_always(path: &Path, tool: &str) -> Result<(), String> {
 ///
 /// # Errors
 ///
-/// A string describing the save failure, for the caller's eprintln.
+/// A string describing the save failure, for the caller's warning.
 fn save_mcp_allow_always(path: &Path, server: &str) -> Result<(), String> {
     Config::save_keys(
         path,
@@ -820,6 +834,112 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(text, "`shell`: denied by user");
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingSink(Arc<Mutex<Vec<(LogLevel, String)>>>);
+
+    impl kage_plugin::HostLog for RecordingSink {
+        fn notify(&mut self, message: &str) {
+            panic!("unexpected notification: {message}");
+        }
+
+        fn log(&mut self, level: LogLevel, message: &str) {
+            lock(&self.0).push((level, message.to_owned()));
+        }
+    }
+
+    fn failed_persistence_approval(mcp: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("permission-persist-marker");
+        std::fs::write(&blocked, "not a directory").unwrap();
+        let path = blocked.join("config.toml");
+        let recording = RecordingSink::default();
+        let sink: SharedHostLog = Arc::new(Mutex::new(Box::new(recording.clone())));
+        let gate = PermissionGate::new(rules_for(PermissionAction::Ask))
+            .with_log(sink)
+            .with_persist_path(path.clone());
+        let gate = if mcp {
+            gate.with_mcp_servers(vec!["github".to_owned()])
+        } else {
+            gate
+        };
+        let tool = if mcp { "github__list_issues" } else { "shell" };
+        let (ask_tx, ask_rx) = channel_asker();
+        let mut worker = gate.clone().with_asker(ask_tx);
+        let handle = std::thread::spawn(move || {
+            worker.before_tool_call(&ToolCallId::new("call"), tool, &shell_input())
+        });
+        let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(ask.tool, tool);
+        ask.reply.send(PermissionDecision::AllowAlways).unwrap();
+        assert!(handle.join().unwrap().is_none());
+        assert!(gate.session_allows(tool));
+        assert!(!path.exists());
+        if mcp {
+            assert_eq!(
+                lock(&gate.rules).mcp_action("github"),
+                PermissionAction::Allow
+            );
+        } else {
+            assert_eq!(
+                lock(&gate.rules).check("shell", "ls"),
+                PermissionAction::Allow
+            );
+        }
+        let mut gate = gate.with_asker(panicking_asker());
+        gate.reset_session();
+        let next_tool = if mcp { "github__create_issue" } else { "shell" };
+        assert!(
+            gate.before_tool_call(&ToolCallId::new("next"), next_tool, &shell_input())
+                .is_none()
+        );
+        let logs = lock(&recording.0);
+        assert_eq!(logs.len(), 1, "{logs:?}");
+        assert_eq!(logs[0].0, LogLevel::Warn);
+        assert!(
+            logs[0].1.starts_with("persist permission: save:"),
+            "{logs:?}"
+        );
+    }
+
+    #[test]
+    fn allow_always_persistence_failures_use_configured_sink() {
+        const CHILD: &str = "KAGE_PERMISSION_SINK_REGRESSION_CHILD";
+        if let Ok(mode) = std::env::var(CHILD) {
+            failed_persistence_approval(mode == "mcp");
+            return;
+        }
+        for mode in ["regular", "mcp"] {
+            let root = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "permissions::tests::allow_always_persistence_failures_use_configured_sink",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env("HOME", root.path())
+                .env("XDG_CONFIG_HOME", root.path().join("config"))
+                .env("XDG_DATA_HOME", root.path().join("data"))
+                .env("XDG_STATE_HOME", root.path().join("state"))
+                .env("XDG_CACHE_HOME", root.path().join("cache"))
+                .env("XDG_RUNTIME_DIR", root.path().join("runtime"))
+                .env(CHILD, mode)
+                .current_dir(root.path())
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success(),
+                "{mode}: stdout: {stdout}\nstderr: {stderr}"
+            );
+            for marker in ["persist permission:", "permission-persist-marker"] {
+                assert!(!stdout.contains(marker), "{mode}: stdout: {stdout}");
+                assert!(!stderr.contains(marker), "{mode}: stderr: {stderr}");
+            }
+        }
     }
 
     #[test]

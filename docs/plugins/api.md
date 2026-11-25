@@ -87,6 +87,11 @@ Record a structured log line. `level` is one of `"trace"`, `"debug"`,
 `"info"`, unlike `kage.ui.notify`, which raises. In the TUI the line
 also shows in the conversation, in order with the turn that logged
 it. Lines logged while kage starts show as `kage:log` blocks instead.
+Plugin loading and background diagnostics from the TUI's private host,
+including provider reloads after login, use the same UI log path rather
+than writing over the terminal. Notifications remain transient toasts.
+Standalone `kage rpc` and command-line runs log to stderr, separately
+from their protocol or response output.
 
 ### `kage.sleep_ms(ms: integer)`
 

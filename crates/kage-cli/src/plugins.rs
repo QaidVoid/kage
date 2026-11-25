@@ -18,7 +18,7 @@ use kage_core::environment::Environment;
 use kage_core::{Content, LoopEvent, Message, ToolOutput, sync::lock};
 use kage_loop::{CompactionPrep, Hooks, StreamRequest, TurnSummary};
 use kage_plugin::{
-    LoadReport, LogLevel, PluginRuntime, PluginRuntimeBuilder, SharedHostLog, SharedOptions,
+    LogLevel, PluginRuntime, PluginRuntimeBuilder, SharedHostLog, SharedOptions,
     session_plugins::SessionPlugins,
 };
 use kage_provider::{Provider, ProviderRegistry};
@@ -48,15 +48,16 @@ pub fn setup_runtime(
             PluginsConfig::default()
         }
     };
-    migrate_plugin_store_dir();
+    let sink = kage_plugin::api::default_host_log();
+    migrate_plugin_store_dir(&sink);
     let runtime = runtime_builder(plugins_cfg, workdir, model, system_prompt)
+        .sink(sink)
         .env(env.clone())
         .state_dir(crate::data_root().ok().map(|r| r.join("plugin-state")))
         .build()
         .map_err(|e| format!("plugin runtime: {e}"))?;
     let report =
         kage_plugin::load_dir(plugins_dir, &runtime).map_err(|e| format!("plugin load: {e}"))?;
-    report_plugins(&report);
     if report.loaded.is_empty() {
         return Ok(None);
     }
@@ -95,7 +96,7 @@ pub(crate) fn setup_user_runtime(
     sink: SharedHostLog,
     env: &Environment,
 ) -> Result<Arc<PluginRuntime>, String> {
-    migrate_plugin_store_dir();
+    migrate_plugin_store_dir(&sink);
     let themes_dir = crate::themes_dir().ok();
     let runtime = runtime_builder(plugins_cfg, workdir, model, system_prompt)
         .sink(sink)
@@ -119,9 +120,7 @@ fn load_tui_runtime(
     runtime: PluginRuntime,
     plugins_dir: Option<&Path>,
 ) -> Result<Arc<PluginRuntime>, String> {
-    let report =
-        kage_plugin::load_all(plugins_dir, &runtime).map_err(|e| format!("plugin load: {e}"))?;
-    report_plugins(&report);
+    kage_plugin::load_all(plugins_dir, &runtime).map_err(|e| format!("plugin load: {e}"))?;
     Ok(Arc::new(runtime))
 }
 
@@ -149,22 +148,13 @@ fn runtime_builder(
         }))
 }
 
-fn report_plugins(report: &LoadReport) {
-    for (path, err) in &report.failed {
-        eprintln!("kage: plugin {} failed to load: {err}", path.display());
-    }
-    for path in &report.skipped {
-        eprintln!("kage: plugin {} skipped (disabled)", path.display());
-    }
-}
-
 /// Move the plugin store from its legacy location under the state root
 /// (`$XDG_STATE_HOME/kage/plugin-state`) to the data root
 /// (`$XDG_DATA_HOME/kage/plugin-state`). A legacy dir is migrated only
 /// when the new location does not exist yet, so already-migrated
 /// installs are left untouched. Loading never fails on migration: the
 /// outcome is logged as a single line.
-fn migrate_plugin_store_dir() {
+fn migrate_plugin_store_dir(sink: &SharedHostLog) {
     let (Ok(old_root), Ok(new_root)) = (crate::state_root(), crate::data_root()) else {
         return;
     };
@@ -172,14 +162,20 @@ fn migrate_plugin_store_dir() {
     let new = new_root.join("plugin-state");
     match migrate_store_dir(&old, &new) {
         Ok(true) => {
-            eprintln!(
-                "kage: migrated plugin store from {} to {}",
-                old.display(),
-                new.display()
+            lock(sink).log(
+                LogLevel::Info,
+                &format!(
+                    "migrated plugin store from {} to {}",
+                    old.display(),
+                    new.display()
+                ),
             );
         }
         Ok(false) => {}
-        Err(e) => eprintln!("kage: plugin store migration failed: {e}"),
+        Err(e) => lock(sink).log(
+            LogLevel::Warn,
+            &format!("plugin store migration failed: {e}"),
+        ),
     }
 }
 
@@ -834,6 +830,226 @@ mod tests {
             std::fs::read_to_string(dst.join("link-file.json")).unwrap(),
             "{\"b\":2}"
         );
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingSink(Arc<std::sync::Mutex<Vec<(LogLevel, String)>>>);
+
+    impl kage_plugin::HostLog for RecordingSink {
+        fn notify(&mut self, message: &str) {
+            panic!("unexpected notification: {message}");
+        }
+
+        fn log(&mut self, level: LogLevel, message: &str) {
+            lock(&self.0).push((level, message.to_owned()));
+        }
+    }
+
+    impl RecordingSink {
+        fn shared(&self) -> SharedHostLog {
+            Arc::new(std::sync::Mutex::new(Box::new(self.clone())))
+        }
+    }
+
+    fn migration_scenario(mode: &str) {
+        let old = crate::state_root().unwrap().join("plugin-state");
+        let new = crate::data_root().unwrap().join("plugin-state");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("value.json"), "{}").unwrap();
+        let failed = mode.ends_with("error");
+        if failed {
+            std::fs::write(new.parent().unwrap(), "not a directory").unwrap();
+        }
+        let workdir = std::env::current_dir().unwrap();
+        if mode.starts_with("configured") {
+            let recording = RecordingSink::default();
+            let runtime = setup_user_runtime(
+                None,
+                None,
+                PluginsConfig::default(),
+                KeybindingsConfig::default(),
+                SharedOptions::default(),
+                &workdir,
+                "m",
+                "",
+                recording.shared(),
+                &Environment::inherit(),
+            )
+            .unwrap();
+            assert!(runtime.registered_tools().is_empty());
+            let logs = lock(&recording.0);
+            assert_eq!(logs.len(), 1, "{logs:?}");
+            if failed {
+                assert_eq!(logs[0].0, LogLevel::Warn);
+                assert!(logs[0].1.contains("plugin store migration failed"));
+            } else {
+                assert_eq!(logs[0].0, LogLevel::Info);
+                assert!(logs[0].1.contains("migrated plugin store"));
+                assert!(logs[0].1.contains(&old.display().to_string()));
+                assert!(logs[0].1.contains(&new.display().to_string()));
+            }
+        } else {
+            assert!(
+                setup_runtime(
+                    &workdir.join("missing-plugins"),
+                    &workdir,
+                    "m",
+                    "",
+                    &Environment::inherit(),
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
+        if failed {
+            assert!(old.join("value.json").exists());
+        } else {
+            assert!(!old.exists());
+            assert_eq!(
+                std::fs::read_to_string(new.join("value.json")).unwrap(),
+                "{}"
+            );
+        }
+    }
+
+    #[test]
+    fn migration_diagnostics_use_configured_sink_or_default_stderr() {
+        const CHILD: &str = "KAGE_MIGRATION_SINK_REGRESSION_CHILD";
+        if let Ok(mode) = std::env::var(CHILD) {
+            migration_scenario(&mode);
+            return;
+        }
+        for mode in [
+            "configured-success",
+            "configured-error",
+            "default-success",
+            "default-error",
+        ] {
+            let root = tempdir().unwrap();
+            let data = root.path().join("data");
+            std::fs::create_dir(&data).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "plugins::tests::migration_diagnostics_use_configured_sink_or_default_stderr",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env("HOME", root.path())
+                .env("XDG_CONFIG_HOME", root.path().join("config"))
+                .env("XDG_DATA_HOME", data)
+                .env("XDG_STATE_HOME", root.path().join("state"))
+                .env(CHILD, mode)
+                .current_dir(root.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{mode}: stdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            let marker = if mode.ends_with("error") {
+                "plugin store migration failed"
+            } else {
+                "migrated plugin store"
+            };
+            assert!(
+                !output
+                    .stdout
+                    .windows(marker.len())
+                    .any(|part| part == marker.as_bytes())
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(
+                stderr.matches(marker).count(),
+                usize::from(mode.starts_with("default")),
+                "{mode}: {stderr}"
+            );
+        }
+    }
+
+    #[test]
+    fn configured_sink_receives_load_diagnostics_once_without_stdio() {
+        const CHILD: &str = "KAGE_LOAD_SINK_REGRESSION_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let plugins = tempdir().unwrap();
+            let user = tempdir().unwrap();
+            let workdir = tempdir().unwrap();
+            std::fs::write(
+                plugins.path().join("broken-load-marker.lua"),
+                "error('plugin-load-error-marker')",
+            )
+            .unwrap();
+            std::fs::write(
+                plugins.path().join("disabled-load-marker.lua"),
+                "error('disabled plugin must not run')",
+            )
+            .unwrap();
+            std::fs::write(
+                user.path().join("init.lua"),
+                "error('init-load-error-marker')",
+            )
+            .unwrap();
+            let recording = RecordingSink::default();
+            let config = PluginsConfig {
+                disabled: vec!["disabled-load-marker".to_owned()],
+                ..PluginsConfig::default()
+            };
+            let runtime = runtime_builder(config, workdir.path(), "m", "")
+                .sink(recording.shared())
+                .user_dir(Some(user.path().to_path_buf()))
+                .build()
+                .unwrap();
+            let _runtime = load_tui_runtime(runtime, Some(plugins.path())).unwrap();
+            let logs = lock(&recording.0);
+            assert_eq!(logs.len(), 3, "{logs:?}");
+            for (level, marker) in [
+                (LogLevel::Error, "plugin-load-error-marker"),
+                (LogLevel::Info, "disabled-load-marker"),
+                (LogLevel::Error, "init-load-error-marker"),
+            ] {
+                assert_eq!(
+                    logs.iter()
+                        .filter(|entry| entry.0 == level && entry.1.contains(marker))
+                        .count(),
+                    1,
+                    "{logs:?}",
+                );
+            }
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "plugins::tests::configured_sink_receives_load_diagnostics_once_without_stdio",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        for marker in [
+            "broken-load-marker",
+            "disabled-load-marker",
+            "plugin-load-error-marker",
+            "init-load-error-marker",
+        ] {
+            for bytes in [&output.stdout, &output.stderr] {
+                assert!(
+                    !bytes
+                        .windows(marker.len())
+                        .any(|part| part == marker.as_bytes()),
+                    "diagnostic leaked: {}",
+                    String::from_utf8_lossy(bytes),
+                );
+            }
+        }
     }
 
     #[test]

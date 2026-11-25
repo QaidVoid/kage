@@ -21,7 +21,7 @@ use kage_core::config::{Config, KeybindingsConfig};
 use kage_core::environment::Environment;
 use kage_core::options::OptionStore;
 use kage_core::sync::lock;
-use kage_plugin::{PluginRuntime, SharedOptions};
+use kage_plugin::{LogLevel, PluginRuntime, SharedHostLog, SharedOptions, default_host_log};
 
 /// How long a runtime no session holds is kept.
 const GRACE: Duration = Duration::from_secs(60);
@@ -48,7 +48,7 @@ struct Entry {
 /// Builds the runtime of the project at a workdir, given what
 /// `kage.config()` reports for its model and system prompt and the
 /// environment work no session asked for runs with.
-type Loader = fn(&Path, &str, &str, &Environment) -> Option<Project>;
+type Loader = fn(&Path, &str, &str, &Environment, &SharedHostLog) -> Option<Project>;
 
 /// The runtimes of the projects the host serves, by canonical workdir.
 pub(super) struct Projects {
@@ -56,6 +56,7 @@ pub(super) struct Projects {
     /// Held while a runtime loads, so two sessions opening one project at
     /// once load its plugins once.
     loading: Mutex<()>,
+    sink: SharedHostLog,
     load: Loader,
     fingerprint: fn(&Path) -> u64,
     /// Whether the project at a workdir has anything to load.
@@ -64,7 +65,15 @@ pub(super) struct Projects {
 
 impl Default for Projects {
     fn default() -> Self {
+        Self::with_log(default_host_log())
+    }
+}
+
+impl Projects {
+    /// Creates a project registry whose runtime and diagnostics use `sink`.
+    pub(super) fn with_log(sink: SharedHostLog) -> Self {
         Self {
+            sink,
             entries: Mutex::default(),
             loading: Mutex::default(),
             load,
@@ -72,9 +81,7 @@ impl Default for Projects {
             has_content: has_plugin_content,
         }
     }
-}
 
-impl Projects {
     /// The runtime of the project at `workdir`, loaded when the project has
     /// none or what it loads from changed, with `model` and the prompt
     /// `system_prompt` builds as what `kage.config()` reports, and `env`
@@ -118,7 +125,7 @@ impl Projects {
         if !(self.has_content)(&key) {
             return None;
         }
-        let project = (self.load)(&key, model, &system_prompt(), env)?;
+        let project = (self.load)(&key, model, &system_prompt(), env, &self.sink)?;
         lock(&self.entries).insert(
             key,
             Entry {
@@ -136,6 +143,11 @@ impl Projects {
     /// with what a load would do.
     pub(super) fn has_content(&self, workdir: &Path) -> bool {
         (self.has_content)(workdir)
+    }
+
+    /// The sink used by project runtimes and session setup diagnostics.
+    pub(super) fn sink(&self) -> &SharedHostLog {
+        &self.sink
     }
 
     /// A registry that loads with `load` where `has_content` allows.
@@ -167,14 +179,23 @@ impl Projects {
 
 /// Build and load the runtime of the project at `workdir`. Its config
 /// decides which plugins load and what they may do, as for the TUI.
-fn load(workdir: &Path, model: &str, system_prompt: &str, env: &Environment) -> Option<Project> {
+fn load(
+    workdir: &Path,
+    model: &str,
+    system_prompt: &str,
+    env: &Environment,
+    sink: &SharedHostLog,
+) -> Option<Project> {
     let config = Config::load_layered(workdir).unwrap_or_else(|e| {
-        eprintln!("kage: plugins: {e}; loading with the defaults");
+        lock(sink).log(
+            LogLevel::Warn,
+            &format!("plugins: {e}; loading with the defaults"),
+        );
         Config::default()
     });
     let (store, errors) = OptionStore::from_config(&config);
     for err in errors {
-        eprintln!("kage: config: {err}");
+        lock(sink).log(LogLevel::Warn, &format!("config: {err}"));
     }
     let options: SharedOptions = Arc::new(Mutex::new(store));
     let plugins_dir = crate::plugins_dir().ok();
@@ -188,12 +209,12 @@ fn load(workdir: &Path, model: &str, system_prompt: &str, env: &Environment) -> 
         workdir,
         model,
         system_prompt,
-        kage_plugin::default_host_log(),
+        Arc::clone(sink),
         env,
     ) {
         Ok(runtime) => Some(Project { runtime, options }),
         Err(e) => {
-            eprintln!("kage: {e}");
+            lock(sink).log(LogLevel::Error, &e);
             None
         }
     }
@@ -346,10 +367,11 @@ mod tests {
         static LOADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let dir = tempfile::tempdir().unwrap();
         let projects = Projects {
+            sink: default_host_log(),
             entries: Mutex::default(),
             loading: Mutex::default(),
             fingerprint: |_| 0,
-            load: |_, _, _, _| {
+            load: |_, _, _, _, _| {
                 LOADS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Some(Project {
                     runtime: Arc::new(PluginRuntime::new().unwrap()),
@@ -370,10 +392,11 @@ mod tests {
         let one = tempfile::tempdir().unwrap();
         let other = tempfile::tempdir().unwrap();
         let projects = Projects {
+            sink: default_host_log(),
             entries: Mutex::default(),
             loading: Mutex::default(),
             fingerprint: |_| 0,
-            load: |_, _, _, _| {
+            load: |_, _, _, _, _| {
                 Some(Project {
                     runtime: Arc::new(PluginRuntime::new().unwrap()),
                     options: SharedOptions::default(),
@@ -416,10 +439,11 @@ mod tests {
         static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = tempfile::tempdir().unwrap();
         let projects = Projects {
+            sink: default_host_log(),
             entries: Mutex::default(),
             loading: Mutex::default(),
             fingerprint: |_| GENERATION.load(std::sync::atomic::Ordering::SeqCst),
-            load: |_, _, _, _| {
+            load: |_, _, _, _, _| {
                 Some(Project {
                     runtime: Arc::new(PluginRuntime::new().unwrap()),
                     options: SharedOptions::default(),

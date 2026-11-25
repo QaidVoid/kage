@@ -29,7 +29,7 @@ use kage_jsonrpc::RpcError;
 use kage_plugin::messages::{PendingMessage, PendingRole};
 use kage_plugin::session_plugins::SessionPlugins;
 use kage_plugin::sessions::PendingSessionOp;
-use kage_plugin::{LogLevel, PluginError, SharedHostLog, default_host_log};
+use kage_plugin::{LogLevel, PluginError, SharedHostLog};
 use kage_tools::{ExecMode, Tool, ToolContext, ToolError};
 use serde_json::Value;
 
@@ -76,10 +76,18 @@ impl std::fmt::Debug for ClientPlugins {
 
 impl ClientPlugins {
     /// Ask the client that owns `session` what its plugins register.
-    /// Fails the session open when the client does not answer, since it
-    /// asked to host the plugins in the first place.
-    pub(super) fn open(session: SessionId, peer: AgentPeer) -> Result<Self, RpcError> {
-        Self::open_with(session, peer, REQUEST_TIMEOUT)
+    /// Plugin diagnostics use the supplied host log.
+    ///
+    /// # Errors
+    ///
+    /// Fails the session open when the client does not answer, reports
+    /// an error, or sends invalid registrations.
+    pub(super) fn open(
+        session: SessionId,
+        peer: AgentPeer,
+        sink: SharedHostLog,
+    ) -> Result<Self, RpcError> {
+        Self::open_with(session, peer, sink, REQUEST_TIMEOUT)
     }
 
     /// [`Self::open`] with `timeout` as the deadline of every request
@@ -90,7 +98,12 @@ impl ClientPlugins {
     /// The owner's error, an internal error when it does not answer
     /// within `timeout` or sends a malformed snapshot, and `-32602`
     /// when a tool names a risk the host does not know.
-    fn open_with(session: SessionId, peer: AgentPeer, timeout: Duration) -> Result<Self, RpcError> {
+    fn open_with(
+        session: SessionId,
+        peer: AgentPeer,
+        sink: SharedHostLog,
+        timeout: Duration,
+    ) -> Result<Self, RpcError> {
         let session_id = session.to_string();
         let registered = fetch(&session_id, &peer, timeout)?;
         Ok(Self {
@@ -98,7 +111,7 @@ impl ClientPlugins {
             peer,
             timeout,
             registered: Mutex::new(Arc::new(registered)),
-            sink: default_host_log(),
+            sink,
         })
     }
 

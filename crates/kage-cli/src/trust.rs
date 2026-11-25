@@ -110,8 +110,16 @@ pub(crate) fn confirm_project_trust(workdir: &Path) {
 /// Print one stderr line when `workdir`'s project has untrusted risky
 /// settings or project files that this run ignores.
 pub(crate) fn warn_if_untrusted(workdir: &Path) {
+    warn_if_untrusted_with_log(workdir, &kage_plugin::default_host_log());
+}
+
+/// Report ignored project settings through `sink`.
+pub(crate) fn warn_if_untrusted_with_log(workdir: &Path, sink: &kage_plugin::SharedHostLog) {
     if let Some(summary) = trust::untrusted_project(workdir) {
-        eprintln!("{}", warning(workdir, &summary));
+        kage_core::sync::lock(sink).log(
+            kage_plugin::LogLevel::Warn,
+            warning(workdir, &summary).trim_start_matches("kage: "),
+        );
     }
 }
 

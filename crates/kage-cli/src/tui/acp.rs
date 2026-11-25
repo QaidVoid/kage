@@ -167,9 +167,10 @@ impl Transport {
         system: &str,
         yolo: bool,
         events: crossbeam_channel::Sender<Event>,
+        sink: kage_plugin::SharedHostLog,
     ) -> Result<Transport, String> {
         let applied = crate::model_refresh::Applied::now();
-        let host = crate::rpc::host::Host::start(model, system, yolo)?;
+        let host = crate::rpc::host::Host::start_with_log(model, system, yolo, sink)?;
         crate::model_refresh::spawn_host(&host, None, applied);
         let (client_read, client_write, host_read, host_write, hangup) =
             private_pair().map_err(|error| format!("cannot open the private pipe: {error}"))?;
@@ -5166,6 +5167,7 @@ pub(crate) fn run(
     // runtime: tools, commands, handlers and the UI surfaces run beside
     // the pump, and the session names this process the plugin host.
     let log_publisher: Arc<OnceLock<LogPublisher>> = Arc::default();
+    let sink = buffer_host_log(buffer.clone(), toasts.clone(), Arc::clone(&log_publisher));
     let plugins_dir_path = match crate::plugins_dir() {
         Ok(dir) => Some(dir),
         Err(e) => {
@@ -5192,7 +5194,7 @@ pub(crate) fn run(
         &workdir,
         &shown_model,
         &bare_prompt,
-        buffer_host_log(buffer.clone(), toasts.clone(), Arc::clone(&log_publisher)),
+        Arc::clone(&sink),
         &kage_core::environment::Environment::inherit(),
     ) {
         Ok(rt) => Some(rt),
@@ -5203,7 +5205,10 @@ pub(crate) fn run(
     };
     if let Some(rt) = plugins.as_ref() {
         for id in crate::plugins::merge_plugin_providers(rt, &mut registry) {
-            eprintln!("kage: plugin provider `{id}` shadows the built-in registration");
+            lock(&sink).log(
+                kage_plugin::LogLevel::Warn,
+                &format!("plugin provider `{id}` shadows the built-in registration"),
+            );
         }
         register_block_renderers(rt);
         let ui = rt.slots().ui_state();
@@ -5232,7 +5237,10 @@ pub(crate) fn run(
             };
             if let Some(rt) = plugins.as_ref() {
                 for id in crate::plugins::merge_plugin_providers(rt, &mut registry) {
-                    eprintln!("kage: plugin provider `{id}` shadows the built-in registration");
+                    lock(&sink).log(
+                        kage_plugin::LogLevel::Warn,
+                        &format!("plugin provider `{id}` shadows the built-in registration"),
+                    );
                 }
             }
             if crate::has_usable_provider(&registry) {
@@ -5272,7 +5280,7 @@ pub(crate) fn run(
         Upstream::Child => Transport::child(frames_tx),
         #[cfg(unix)]
         Upstream::Host(stream) => Transport::host(stream, frames_tx),
-        Upstream::Private => Transport::memory(model, system, yolo, frames_tx),
+        Upstream::Private => Transport::memory(model, system, yolo, frames_tx, Arc::clone(&sink)),
         Upstream::Decide { .. } => unreachable!("resolved above"),
     };
     let transport = match transport {
@@ -5404,6 +5412,7 @@ pub(crate) fn run(
     let _ = log_publisher.set(Box::new(move |level, message| {
         let level = match level {
             kage_plugin::LogLevel::Error => NoticeLevel::Error,
+            kage_plugin::LogLevel::Warn => NoticeLevel::Warning,
             _ => NoticeLevel::Info,
         };
         let _ = log_events.send(Envelope {
@@ -5448,11 +5457,12 @@ pub(crate) fn run(
         .as_ref()
         .map(|rt| snapshot_plugin_commands(rt))
         .unwrap_or_default();
-    let skills = crate::load_skills(
+    let skills = crate::load_skills_with_log(
         &workdir,
         plugins
             .as_deref()
             .map(|rt| rt as &dyn kage_plugin::session_plugins::SessionPlugins),
+        &sink,
     );
     Frontend {
         buffer: root,
@@ -5575,6 +5585,102 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kage-acp-{}-{unique}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn private_host_reload_uses_the_ui_log_after_startup() {
+        const CHILD: &str = "KAGE_PRIVATE_HOST_UI_LOG_CHILD";
+        const NAME: &str = "tui::acp::tests::private_host_reload_uses_the_ui_log_after_startup";
+        const MARKER: &str = "private-host-ui-log-marker";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture"])
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", root.path())
+                .env("XDG_CONFIG_HOME", root.path().join("config"))
+                .env("XDG_DATA_HOME", root.path().join("data"))
+                .env("XDG_STATE_HOME", root.path().join("state"))
+                .env("XDG_CACHE_HOME", root.path().join("cache"))
+                .env(CHILD, "1")
+                .current_dir(root.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "stdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            assert!(
+                output.stderr.is_empty(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(!String::from_utf8_lossy(&output.stdout).contains(MARKER));
+            return;
+        }
+        let config = crate::config_dir().unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(
+            config.join("config.toml"),
+            "[models]\nauto_refresh = false\n",
+        )
+        .unwrap();
+        std::fs::write(
+            config.join("init.lua"),
+            format!("kage.log('warn', '{MARKER}')\nkage.notify('{MARKER}')"),
+        )
+        .unwrap();
+        let buffer = shared_buffer();
+        let toasts = shared_toasts();
+        let publisher: Arc<OnceLock<LogPublisher>> = Arc::default();
+        let sink = buffer_host_log(buffer.clone(), toasts.clone(), Arc::clone(&publisher));
+        let (events, received) = crossbeam_channel::unbounded();
+        let transport = Transport::memory(None, "test", false, events, sink).unwrap();
+        assert!(lock(&buffer).blocks().iter().any(|block| matches!(
+            block.as_ref(),
+            kage_tui::buffer::Block::Custom { text, .. } if text.contains(MARKER)
+        )));
+        let startup_blocks = lock(&buffer).blocks().len();
+        let (log_sender, log_messages) = mpsc::channel();
+        assert!(
+            publisher
+                .set(Box::new(move |level, message| {
+                    log_sender.send((level, message.to_owned())).unwrap();
+                }))
+                .is_ok()
+        );
+        for (id, method, params) in [
+            (1, "initialize", serde_json::json!({"protocolVersion": 1})),
+            (2, "_kage/providers/reload", serde_json::json!({})),
+        ] {
+            transport.send(Frame::Request {
+                id: RequestId::Number(id),
+                method: method.to_owned(),
+                params,
+            });
+            loop {
+                match received.recv_timeout(Duration::from_secs(10)).unwrap() {
+                    Event::Frame(Frame::Success { id: response, .. })
+                        if response == RequestId::Number(id) =>
+                    {
+                        break;
+                    }
+                    Event::Frame(Frame::Notification { .. }) => {}
+                    other => panic!("unexpected response: {other:?}"),
+                }
+            }
+        }
+        assert_eq!(
+            log_messages.recv_timeout(Duration::from_secs(10)).unwrap(),
+            (kage_plugin::LogLevel::Warn, MARKER.to_owned()),
+        );
+        assert_eq!(lock(&buffer).blocks().len(), startup_blocks);
+        assert_eq!(lock(&toasts).len(), 2);
+        drop(transport);
     }
 
     #[cfg(unix)]

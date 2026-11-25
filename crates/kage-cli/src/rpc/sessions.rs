@@ -68,6 +68,10 @@ impl super::CliAcpAgent {
     /// its own settings and hosting; the ask is still validated, so a
     /// bad one is refused the same way a new session's is. Returns the
     /// session's config options.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one recorded-session restoration workflow"
+    )]
     pub(super) fn open_recorded(
         &self,
         client_id: &str,
@@ -147,10 +151,11 @@ impl super::CliAcpAgent {
         let model = if providers.registry.resolve(&replay.model).is_ok() {
             replay.model
         } else {
-            eprintln!(
-                "kage: rpc: session model {} unavailable; using {} instead",
+            let warning = format!(
+                "rpc: session model {} unavailable; using {} instead",
                 replay.model, providers.default_model
             );
+            self.host.log(kage_plugin::LogLevel::Warn, &warning);
             providers.default_model.clone()
         };
         let (mut spec, runtime) = self.session_spec(

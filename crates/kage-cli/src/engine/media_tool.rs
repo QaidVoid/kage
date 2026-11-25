@@ -9,6 +9,8 @@ use std::time::Duration;
 
 use kage_core::ToolOutput;
 use kage_core::config::{Config, CustomProviderKind, MediaToolConfig};
+use kage_core::sync::lock;
+use kage_plugin::{LogLevel, SharedHostLog};
 use kage_provider::ProviderError;
 use kage_provider::compat::{COMPAT_PROVIDERS, CompatKind};
 use kage_provider::media::{MediaEndpoint, MediaError};
@@ -40,10 +42,18 @@ pub(crate) trait WithMediaTools {
     /// session.
     #[must_use]
     fn with_media_tools(self, config: &Config) -> Self;
+
+    /// Register configured media tools and report invalid tables through `sink`.
+    #[must_use]
+    fn with_media_tools_log(self, config: &Config, sink: &SharedHostLog) -> Self;
 }
 
 impl WithMediaTools for ToolRegistry {
-    fn with_media_tools(mut self, config: &Config) -> Self {
+    fn with_media_tools(self, config: &Config) -> Self {
+        self.with_media_tools_log(config, &kage_plugin::default_host_log())
+    }
+
+    fn with_media_tools_log(mut self, config: &Config, sink: &SharedHostLog) -> Self {
         let tools = &config.tools;
         // A set table names a real tool even when it is disabled or
         // broken, so it must not be reported as matching no tool.
@@ -69,8 +79,9 @@ impl WithMediaTools for ToolRegistry {
             match GenerateImageTool::from_config(config, &store) {
                 Ok(tool) => self.register(Arc::new(tool)),
                 Err(reason) => {
-                    eprintln!(
-                        "kage: [tools.generate_image] {reason}; {GENERATE_IMAGE_TOOL} is off"
+                    lock(sink).log(
+                        LogLevel::Warn,
+                        &format!("[tools.generate_image] {reason}; {GENERATE_IMAGE_TOOL} is off"),
                     );
                 }
             }
@@ -79,7 +90,10 @@ impl WithMediaTools for ToolRegistry {
             match EditImageTool::from_config(config, &store) {
                 Ok(tool) => self.register(Arc::new(tool)),
                 Err(reason) => {
-                    eprintln!("kage: [tools.edit_image] {reason}; {EDIT_IMAGE_TOOL} is off");
+                    lock(sink).log(
+                        LogLevel::Warn,
+                        &format!("[tools.edit_image] {reason}; {EDIT_IMAGE_TOOL} is off"),
+                    );
                 }
             }
         }
@@ -87,8 +101,9 @@ impl WithMediaTools for ToolRegistry {
             match GenerateSpeechTool::from_config(config, &store) {
                 Ok(tool) => self.register(Arc::new(tool)),
                 Err(reason) => {
-                    eprintln!(
-                        "kage: [tools.generate_speech] {reason}; {GENERATE_SPEECH_TOOL} is off"
+                    lock(sink).log(
+                        LogLevel::Warn,
+                        &format!("[tools.generate_speech] {reason}; {GENERATE_SPEECH_TOOL} is off"),
                     );
                 }
             }
@@ -97,8 +112,9 @@ impl WithMediaTools for ToolRegistry {
             match GenerateMusicTool::from_config(config, &store) {
                 Ok(tool) => self.register(Arc::new(tool)),
                 Err(reason) => {
-                    eprintln!(
-                        "kage: [tools.generate_music] {reason}; {GENERATE_MUSIC_TOOL} is off"
+                    lock(sink).log(
+                        LogLevel::Warn,
+                        &format!("[tools.generate_music] {reason}; {GENERATE_MUSIC_TOOL} is off"),
                     );
                 }
             }
@@ -533,6 +549,34 @@ mod tests {
         std::os::unix::fs::symlink(dir.path(), dir.path().join("here")).unwrap();
         assert!(workspace_path(dir.path(), "here").is_err());
         assert!(workspace_path(dir.path(), "here/clip.mp3").is_ok());
+    }
+
+    #[test]
+    fn invalid_media_tables_report_through_the_ui_sink() {
+        let config: Config = toml::from_str(
+            "[tools.generate_image]\nmodel = \"\"\n\
+             [tools.edit_image]\nmodel = \"\"\n\
+             [tools.generate_speech]\nmodel = \"\"\n\
+             [tools.generate_music]\nmodel = \"\"\n",
+        )
+        .unwrap();
+        let buffer = kage_tui::events::shared_buffer();
+        let sink = kage_tui::hostlog::buffer_host_log(
+            buffer.clone(),
+            kage_tui::toast::shared_toasts(),
+            Arc::default(),
+        );
+        let tools = kage_tools::builtin_registry().with_media_tools_log(&config, &sink);
+        let buffer = lock(&buffer);
+        assert_eq!(buffer.blocks().len(), 4);
+        for name in crate::engine::MEDIA_TOOLS {
+            assert!(tools.get(name).is_none());
+            assert!(buffer.blocks().iter().any(|block| matches!(
+                block.as_ref(),
+                kage_tui::buffer::Block::Custom { text, .. }
+                    if text.starts_with(&format!("[Warn] [tools.{name}]"))
+            )));
+        }
     }
 
     #[test]

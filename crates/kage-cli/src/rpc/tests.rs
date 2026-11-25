@@ -7938,7 +7938,13 @@ fn a_launch_installs_only_after_a_report_is_consumed() {
 }
 
 /// A load that finds content but fails anyway, for the attach-id test.
-fn failing_load(_: &Path, _: &str, _: &str, _: &Environment) -> Option<super::projects::Project> {
+fn failing_load(
+    _: &Path,
+    _: &str,
+    _: &str,
+    _: &Environment,
+    _: &kage_plugin::SharedHostLog,
+) -> Option<super::projects::Project> {
     None
 }
 
@@ -8104,7 +8110,13 @@ fn a_session_bound_attach_pins_its_runtime() {
 #[test]
 fn the_cwd_attach_follows_the_plugin_content_gate() {
     #[expect(clippy::unnecessary_wraps, reason = "the loader's signature")]
-    fn load(_: &Path, _: &str, _: &str, _: &Environment) -> Option<super::projects::Project> {
+    fn load(
+        _: &Path,
+        _: &str,
+        _: &str,
+        _: &Environment,
+        _: &kage_plugin::SharedHostLog,
+    ) -> Option<super::projects::Project> {
         let mut caps = std::collections::BTreeMap::new();
         caps.insert("p".to_owned(), Vec::<String>::new());
         let runtime = Arc::new(

@@ -22,7 +22,10 @@ const MAX_FOLDERS: usize = 2_000;
 /// Returns an [`RpcError`] when the folder does not exist or cannot
 /// be read, or when the path is drive-relative (`C:temp`), which has
 /// no current directory to resolve against.
-pub(crate) fn folders(req: &FoldersRequest) -> Result<FoldersResult, RpcError> {
+pub(crate) fn folders(
+    req: &FoldersRequest,
+    sink: &kage_plugin::SharedHostLog,
+) -> Result<FoldersResult, RpcError> {
     let home = dirs::home_dir();
     let asked = req.path.as_deref().map(str::trim).filter(|p| !p.is_empty());
     let path = resolve(asked, home.as_deref()).map_err(|message| RpcError::new(-32602, message))?;
@@ -37,9 +40,12 @@ pub(crate) fn folders(req: &FoldersRequest) -> Result<FoldersResult, RpcError> {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                eprintln!(
-                    "kage: folders: skipped an unreadable entry in {}: {error}",
-                    path.display()
+                kage_core::sync::lock(sink).log(
+                    kage_plugin::LogLevel::Warn,
+                    &format!(
+                        "folders: skipped an unreadable entry in {}: {error}",
+                        path.display()
+                    ),
                 );
                 skipped += 1;
                 continue;
@@ -51,10 +57,13 @@ pub(crate) fn folders(req: &FoldersRequest) -> Result<FoldersResult, RpcError> {
         let name = match entry.file_name().into_string() {
             Ok(name) => name,
             Err(name) => {
-                eprintln!(
-                    "kage: folders: skipped a non-UTF8 name in {}: {}",
-                    path.display(),
-                    name.to_string_lossy()
+                kage_core::sync::lock(sink).log(
+                    kage_plugin::LogLevel::Warn,
+                    &format!(
+                        "folders: skipped a non-UTF8 name in {}: {}",
+                        path.display(),
+                        name.to_string_lossy()
+                    ),
                 );
                 skipped += 1;
                 continue;
@@ -152,9 +161,12 @@ mod tests {
             std::fs::create_dir(dir.path().join(name)).unwrap();
         }
         std::fs::write(dir.path().join("file.txt"), "").unwrap();
-        let listed = folders(&FoldersRequest {
-            path: Some(dir.path().display().to_string()),
-        })
+        let listed = folders(
+            &FoldersRequest {
+                path: Some(dir.path().display().to_string()),
+            },
+            &kage_plugin::default_host_log(),
+        )
         .unwrap();
         assert_eq!(listed.folders, ["Alpha", "beta"]);
         let root = dir.path().canonicalize().unwrap();
@@ -168,9 +180,12 @@ mod tests {
 
     #[test]
     fn a_missing_folder_is_an_error() {
-        let err = folders(&FoldersRequest {
-            path: Some("/no/such/kage/folder".into()),
-        })
+        let err = folders(
+            &FoldersRequest {
+                path: Some("/no/such/kage/folder".into()),
+            },
+            &kage_plugin::default_host_log(),
+        )
         .unwrap_err();
         assert!(
             err.message.contains("/no/such/kage/folder"),
@@ -185,9 +200,12 @@ mod tests {
         for name in [".cache", "keep"] {
             std::fs::create_dir(dir.path().join(name)).unwrap();
         }
-        let listed = folders(&FoldersRequest {
-            path: Some(dir.path().display().to_string()),
-        })
+        let listed = folders(
+            &FoldersRequest {
+                path: Some(dir.path().display().to_string()),
+            },
+            &kage_plugin::default_host_log(),
+        )
         .unwrap();
         assert_eq!(listed.folders, ["keep"]);
         assert_eq!(listed.skipped, 1);
@@ -206,13 +224,28 @@ mod tests {
         std::fs::create_dir(dir.path().join("good")).unwrap();
         let raw = OsStr::from_bytes(b"\xffnot-utf8");
         std::fs::create_dir(dir.path().join(raw)).unwrap();
-        let listed = folders(&FoldersRequest {
-            path: Some(dir.path().display().to_string()),
-        })
+        let buffer = kage_tui::events::shared_buffer();
+        let sink = kage_tui::hostlog::buffer_host_log(
+            buffer.clone(),
+            kage_tui::toast::shared_toasts(),
+            std::sync::Arc::default(),
+        );
+        let listed = folders(
+            &FoldersRequest {
+                path: Some(dir.path().display().to_string()),
+            },
+            &sink,
+        )
         .unwrap();
         assert_eq!(listed.folders, ["good"]);
         assert_eq!(listed.skipped, 1);
         assert!(!listed.truncated);
+        let buffer = kage_core::sync::lock(&buffer);
+        assert!(matches!(
+            buffer.blocks()[0].as_ref(),
+            kage_tui::buffer::Block::Custom { text, .. }
+                if text.contains("[Warn] folders: skipped a non-UTF8 name")
+        ));
     }
 
     #[test]

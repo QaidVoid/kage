@@ -24,8 +24,9 @@ use std::sync::Arc;
 use kage_core::config::{Config, McpConfig, McpServer, ShellConfig, ToolsConfig};
 use kage_core::environment::Environment;
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
+use kage_core::sync::lock;
 use kage_mcp::{McpError, McpManager};
-use kage_plugin::PluginRuntime;
+use kage_plugin::{LogLevel, PluginRuntime, SharedHostLog, default_host_log};
 use kage_tools::ToolRegistry;
 
 /// Serve the built-in `tools` as an MCP server until stdin closes.
@@ -140,13 +141,20 @@ fn serve_verdict(
 /// then any a plugin declared via `kage.mcp.add_server` (a plugin
 /// entry overrides a config entry of the same name, matching the
 /// "plugins configure, core spawns" model used for ACP agents). A
-/// malformed config warns on stderr and degrades to just the
+/// malformed config warns through `sink` and degrades to just the
 /// plugin-declared set rather than failing the run.
-fn merged_config(workdir: &Path, runtime: Option<&PluginRuntime>) -> McpConfig {
+fn merged_config(
+    workdir: &Path,
+    runtime: Option<&PluginRuntime>,
+    sink: &SharedHostLog,
+) -> McpConfig {
     let mut merged = match Config::load_layered(workdir) {
         Ok(c) => c.mcp,
         Err(e) => {
-            eprintln!("kage: mcp: {e}; spawning only plugin-declared servers");
+            lock(sink).log(
+                LogLevel::Warn,
+                &format!("mcp: {e}; spawning only plugin-declared servers"),
+            );
             McpConfig::default()
         }
     };
@@ -204,9 +212,10 @@ pub(crate) fn spawn_and_register_with(
     extra: BTreeMap<String, McpServer>,
     env: Environment,
 ) -> (McpManager, Vec<(String, McpError)>) {
-    let mut cfg = merged_config(workdir, runtime);
-    merge_extra(&mut cfg, extra);
-    let handler = sampling_handler(workdir, &env);
+    let sink = runtime.map_or_else(default_host_log, PluginRuntime::sink);
+    let mut cfg = merged_config(workdir, runtime, &sink);
+    merge_extra(&mut cfg, extra, &sink);
+    let handler = sampling_handler(workdir, &env, &sink);
     let (mut manager, mut errors) = McpManager::spawn_all_with(
         &cfg,
         vec![workdir.to_path_buf()],
@@ -226,11 +235,12 @@ pub(crate) fn unstarted_with(
     runtime: Option<&PluginRuntime>,
     extra: BTreeMap<String, McpServer>,
     env: Environment,
+    sink: &SharedHostLog,
 ) -> McpManager {
     let handed: Vec<String> = extra.keys().cloned().collect();
-    let mut cfg = merged_config(workdir, runtime);
-    merge_extra(&mut cfg, extra);
-    let handler = sampling_handler(workdir, &env);
+    let mut cfg = merged_config(workdir, runtime, sink);
+    merge_extra(&mut cfg, extra, sink);
+    let handler = sampling_handler(workdir, &env, sink);
     McpManager::unstarted(
         &cfg,
         vec![workdir.to_path_buf()],
@@ -242,11 +252,14 @@ pub(crate) fn unstarted_with(
 }
 
 /// Adds `extra` to `cfg`. An entry replaces the server of the same name,
-/// and stderr says so.
-fn merge_extra(cfg: &mut McpConfig, extra: BTreeMap<String, McpServer>) {
+/// and the configured sink reports the replacement.
+fn merge_extra(cfg: &mut McpConfig, extra: BTreeMap<String, McpServer>, sink: &SharedHostLog) {
     for (name, server) in extra {
         if cfg.servers.insert(name.clone(), server).is_some() {
-            eprintln!("kage: mcp `{name}`: the editor's server replaces the configured one");
+            lock(sink).log(
+                LogLevel::Warn,
+                &format!("mcp `{name}`: the editor's server replaces the configured one"),
+            );
         }
     }
 }
@@ -258,11 +271,12 @@ fn merge_extra(cfg: &mut McpConfig, extra: BTreeMap<String, McpServer>) {
 fn sampling_handler(
     workdir: &Path,
     env: &Environment,
+    sink: &SharedHostLog,
 ) -> Option<std::sync::Arc<dyn kage_mcp::ServerRequestHandler>> {
-    let registry = match crate::build_provider_registry() {
+    let registry = match crate::providers::build_provider_registry_with_log(sink) {
         Ok(registry) => registry,
         Err(e) => {
-            eprintln!("kage: mcp sampling: {e}");
+            lock(sink).log(LogLevel::Error, &format!("mcp sampling: {e}"));
             return None;
         }
     };
@@ -408,6 +422,52 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::result_large_err,
+        reason = "figment's jail uses its error type"
+    )]
+    fn configuration_fallbacks_and_server_replacements_use_the_ui_sink() {
+        figment::Jail::expect_with(|jail| {
+            let root = jail.directory().to_path_buf();
+            jail.set_env(
+                "XDG_CONFIG_HOME",
+                root.join("config").to_string_lossy().as_ref(),
+            );
+            std::fs::create_dir_all(root.join("config/kage")).unwrap();
+            std::fs::write(root.join("config/kage/config.toml"), "[invalid").unwrap();
+            let buffer = kage_tui::events::shared_buffer();
+            let sink = kage_tui::hostlog::buffer_host_log(
+                buffer.clone(),
+                kage_tui::toast::shared_toasts(),
+                Arc::default(),
+            );
+            let mut config = super::merged_config(&root, None, &sink);
+            assert!(config.servers.is_empty());
+            config.servers.insert("both".into(), stdio("configured"));
+            merge_extra(
+                &mut config,
+                [("both".into(), stdio("editor"))].into(),
+                &sink,
+            );
+            assert!(super::sampling_handler(&root, &Environment::inherit(), &sink).is_none());
+            let buffer = kage_core::sync::lock(&buffer);
+            let logs: Vec<_> = buffer
+                .blocks()
+                .iter()
+                .map(|block| match block.as_ref() {
+                    kage_tui::buffer::Block::Custom { text, .. } => text.as_str(),
+                    other => panic!("unexpected block: {other:?}"),
+                })
+                .collect();
+            assert_eq!(logs.len(), 3, "{logs:?}");
+            assert!(logs[0].contains("[Warn] mcp:"));
+            assert!(logs[1].contains("[Warn] mcp `both`:"));
+            assert!(logs[2].contains("mcp sampling:"));
+            Ok(())
+        });
+    }
+
+    #[test]
     fn extra_servers_join_and_win_a_name_clash() {
         let mut cfg = kage_core::config::McpConfig::default();
         cfg.servers.insert("both".into(), stdio("configured"));
@@ -415,7 +475,7 @@ mod tests {
         let extra = [("both", "editor"), ("new", "new")]
             .map(|(name, command)| (name.to_owned(), stdio(command)))
             .into();
-        merge_extra(&mut cfg, extra);
+        merge_extra(&mut cfg, extra, &kage_plugin::default_host_log());
         let commands: Vec<_> = cfg
             .servers
             .iter()

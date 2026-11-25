@@ -754,7 +754,11 @@ impl CliAcpAgent {
         }
         match source {
             Some(PluginsSource::Client) => {
-                let plugins = Arc::new(client_plugins::ClientPlugins::open(id, self.peer.clone())?);
+                let plugins = Arc::new(client_plugins::ClientPlugins::open(
+                    id,
+                    self.peer.clone(),
+                    self.host.sink(),
+                )?);
                 let mut hosted = lock(&self.client_plugins);
                 hosted.retain(|_, plugins| plugins.strong_count() > 0);
                 hosted.insert(id, Arc::downgrade(&plugins));
@@ -1565,7 +1569,7 @@ impl Agent for CliAcpAgent {
     }
 
     fn folders(&self, req: FoldersRequest) -> Result<FoldersResult, RpcError> {
-        folders::folders(&req)
+        folders::folders(&req, &self.host.sink())
     }
 
     fn themes(&self, _req: ThemesRequest) -> Result<ThemesResult, RpcError> {

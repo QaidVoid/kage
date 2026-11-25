@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use kage_core::CancelFlag;
 use kage_jsonrpc::Inbound;
-use kage_plugin::HostLog;
+use kage_plugin::{HostLog, default_host_log};
 use serde_json::json;
 
 use super::*;
@@ -84,7 +84,8 @@ fn owner_answering(reply: Value) -> (ClientPlugins, Owner) {
             reply.clone()
         }))
     }));
-    let plugins = ClientPlugins::open_with(SessionId::new(), peer, LONG).unwrap();
+    let plugins =
+        ClientPlugins::open_with(SessionId::new(), peer, default_host_log(), LONG).unwrap();
     (plugins, owner)
 }
 
@@ -93,7 +94,8 @@ fn silent_owner(timeout: Duration) -> (ClientPlugins, Owner) {
     let (peer, owner) = spawn_owner(Box::new(|method, _| {
         (method == PLUGIN_TOOLS).then(|| Ok(snapshot()))
     }));
-    let plugins = ClientPlugins::open_with(SessionId::new(), peer, timeout).unwrap();
+    let plugins =
+        ClientPlugins::open_with(SessionId::new(), peer, default_host_log(), timeout).unwrap();
     (plugins, owner)
 }
 
@@ -302,7 +304,8 @@ fn a_malformed_or_failed_tool_reply_is_a_tool_error() {
             Err(RpcError::internal("boom"))
         })
     }));
-    let plugins = ClientPlugins::open_with(SessionId::new(), peer, LONG).unwrap();
+    let plugins =
+        ClientPlugins::open_with(SessionId::new(), peer, default_host_log(), LONG).unwrap();
     let err = run_tool(&plugins, &CancelFlag::new()).unwrap_err();
     assert!(
         matches!(&err, ToolError::Other(m) if m.contains("boom")),
@@ -313,11 +316,13 @@ fn a_malformed_or_failed_tool_reply_is_a_tool_error() {
 #[test]
 fn opening_fails_when_the_owner_errors_or_is_malformed() {
     let (peer, _owner) = spawn_owner(Box::new(|_, _| Some(Err(RpcError::internal("no tools")))));
-    let err = ClientPlugins::open_with(SessionId::new(), peer, LONG).unwrap_err();
+    let err =
+        ClientPlugins::open_with(SessionId::new(), peer, default_host_log(), LONG).unwrap_err();
     assert!(err.message.contains("no tools"), "{err}");
 
     let (peer, _owner) = spawn_owner(Box::new(|_, _| Some(Ok(json!({ "tools": 3 })))));
-    let err = ClientPlugins::open_with(SessionId::new(), peer, LONG).unwrap_err();
+    let err =
+        ClientPlugins::open_with(SessionId::new(), peer, default_host_log(), LONG).unwrap_err();
     assert!(err.message.contains("plugin tools"), "{err}");
 }
 
@@ -325,7 +330,8 @@ fn opening_fails_when_the_owner_errors_or_is_malformed() {
 fn opening_times_out_on_a_silent_owner() {
     let (peer, _owner) = spawn_owner(Box::new(|_, _| None));
     let started = Instant::now();
-    let err = ClientPlugins::open_with(SessionId::new(), peer, SHORT).unwrap_err();
+    let err =
+        ClientPlugins::open_with(SessionId::new(), peer, default_host_log(), SHORT).unwrap_err();
     assert!(err.message.contains("did not answer"), "{err}");
     assert!(err.message.contains(PLUGIN_TOOLS), "{err}");
     assert!(started.elapsed() < LONG);
@@ -337,7 +343,8 @@ fn open_with_risk(risk: Option<&str>) -> Result<Vec<Arc<dyn Tool>>, RpcError> {
         tools["tools"][0]["risk"] = json!(risk);
     }
     let (peer, _owner) = spawn_owner(Box::new(move |_, _| Some(Ok(tools.clone()))));
-    ClientPlugins::open_with(SessionId::new(), peer, LONG).map(|p| p.registered_tools())
+    ClientPlugins::open_with(SessionId::new(), peer, default_host_log(), LONG)
+        .map(|p| p.registered_tools())
 }
 
 #[test]
@@ -421,4 +428,183 @@ fn a_cancelled_flag_stops_a_tool_before_it_asks() {
     let err = run_tool(&plugins, &cancel).unwrap_err();
     assert!(matches!(err, ToolError::Cancelled), "{err}");
     assert!(owner.calls_to(PLUGIN_CALL).is_empty());
+}
+
+fn recording_sink() -> (SharedHostLog, Arc<Mutex<Vec<String>>>) {
+    let lines = Lines::default();
+    let seen = Arc::clone(&lines.0);
+    (Arc::new(Mutex::new(Box::new(lines))), seen)
+}
+
+#[test]
+fn configured_proxy_sink_receives_errors_drains_and_invalid_labels() {
+    let (peer, owner) = spawn_owner(Box::new(|method, params| {
+        Some(match method {
+            PLUGIN_TOOLS => Ok(snapshot()),
+            PLUGIN_EVENT => Err(RpcError::internal("proxy-event-error-marker")),
+            PLUGIN_CALL => Err(RpcError::internal("proxy-tool-error-marker")),
+            PLUGIN_DRAIN => match params["queue"].as_str() {
+                Some("mcp_restarts") => Err(RpcError::internal("proxy-drain-error-marker")),
+                Some("messages") => Ok(json!({"messages": "proxy-malformed-drain-marker"})),
+                Some("session_ops_for") => Ok(json!({
+                    "ops": [{"op": "set_label", "anchor": "proxy-invalid-anchor-marker", "text": "dropped"}],
+                })),
+                _ => unreachable!("unexpected drain: {params}"),
+            },
+            _ => unreachable!("unexpected method: {method}"),
+        })
+    }));
+    let (sink, lines) = recording_sink();
+    let plugins = Arc::new(ClientPlugins::open(SessionId::new(), peer, sink.clone()).unwrap());
+    plugins.notify_event("message_start", &Value::Null).unwrap();
+    assert!(plugins.take_mcp_restarts().is_empty());
+    assert!(plugins.take_pending_messages().is_empty());
+    let error = run_tool(&plugins, &CancelFlag::new()).unwrap_err();
+    assert!(
+        error.to_string().contains("proxy-tool-error-marker"),
+        "{error}"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let header = kage_session::Header {
+        version: kage_session::FORMAT_VERSION,
+        session: SessionId::new(),
+        id: kage_session::EntryId::new(),
+        ts: chrono::Utc::now(),
+        cwd: dir.path().to_path_buf(),
+        model: "mock:m".to_owned(),
+        backend: None,
+        system_prompt: String::new(),
+        parent_session: None,
+        parent_entry: None,
+    };
+    let mut recorder = crate::engine::Recorder::planned(
+        path.clone(),
+        header,
+        Some(plugins.clone() as Arc<dyn SessionPlugins>),
+    );
+    recorder
+        .observe(
+            &kage_core::LoopEvent::TurnEnded {
+                index: 0,
+                had_tool_calls: false,
+            },
+            "mock/m",
+            None,
+        )
+        .unwrap();
+    assert!(!path.exists());
+    assert!(Arc::ptr_eq(&plugins.sink(), &sink));
+    let lines = lock(&lines).clone();
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    for (line, marker) in lines.iter().zip([
+        "Error: message_start dispatch:",
+        "Warn: plugin drain:",
+        "Warn: plugin drain:",
+        "Warn: set_label: invalid entry id",
+    ]) {
+        assert!(line.starts_with(marker), "{line}");
+    }
+    assert!(lines[0].contains("proxy-event-error-marker"));
+    assert!(lines[1].contains("proxy-drain-error-marker"));
+    assert!(lines[2].contains("proxy-malformed-drain-marker"));
+    assert!(lines[3].contains("proxy-invalid-anchor-marker"));
+    owner.leave();
+}
+
+#[test]
+fn configured_proxy_sink_receives_timeout_warnings_once() {
+    let (peer, owner) = spawn_owner(Box::new(|method, _| {
+        (method == PLUGIN_TOOLS).then(|| Ok(snapshot()))
+    }));
+    let (sink, lines) = recording_sink();
+    let plugins = ClientPlugins::open_with(SessionId::new(), peer, sink.clone(), SHORT).unwrap();
+    let payload = json!({"n": 1});
+    assert_eq!(
+        plugins
+            .dispatch_transform("message_start", payload.clone())
+            .unwrap(),
+        payload
+    );
+    assert!(
+        !plugins
+            .dispatch_predicate("tool_call", &Value::Null)
+            .unwrap()
+    );
+    plugins.notify_event("message_start", &Value::Null).unwrap();
+    assert!(plugins.take_mcp_restarts().is_empty());
+    assert!(plugins.take_pending_messages().is_empty());
+    assert!(plugins.take_pending_session_ops().is_empty());
+
+    assert!(Arc::ptr_eq(&plugins.sink(), &sink));
+    let lines = lock(&lines).clone();
+    assert_eq!(lines.len(), 6, "{lines:?}");
+    assert!(
+        lines
+            .iter()
+            .all(|line| line.starts_with("Warn: the client's plugin host did not answer")),
+        "{lines:?}"
+    );
+    for (method, expected) in [(PLUGIN_HOOK, 2), (PLUGIN_EVENT, 1), (PLUGIN_DRAIN, 3)] {
+        assert_eq!(
+            lines.iter().filter(|line| line.contains(method)).count(),
+            expected,
+            "{lines:?}"
+        );
+    }
+    owner.leave();
+}
+
+#[test]
+fn configured_proxy_diagnostics_stay_off_stdio() {
+    const CHILD: &str = "KAGE_PROXY_SINK_REGRESSION_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        configured_proxy_sink_receives_errors_drains_and_invalid_labels();
+        configured_proxy_sink_receives_timeout_warnings_once();
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "rpc::client_plugins::tests::configured_proxy_diagnostics_stay_off_stdio",
+            "--nocapture",
+        ])
+        .env_clear()
+        .env("HOME", root.path())
+        .env("XDG_CONFIG_HOME", root.path().join("config"))
+        .env("XDG_DATA_HOME", root.path().join("data"))
+        .env("XDG_STATE_HOME", root.path().join("state"))
+        .env("XDG_CACHE_HOME", root.path().join("cache"))
+        .env("XDG_RUNTIME_DIR", root.path().join("runtime"))
+        .env(CHILD, "1")
+        .current_dir(root.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    for marker in [
+        "proxy-event-error-marker",
+        "proxy-tool-error-marker",
+        "proxy-drain-error-marker",
+        "proxy-malformed-drain-marker",
+        "proxy-invalid-anchor-marker",
+        "the client's plugin host did not answer",
+        "plugin drain:",
+    ] {
+        for bytes in [&output.stdout, &output.stderr] {
+            assert!(
+                !bytes
+                    .windows(marker.len())
+                    .any(|part| part == marker.as_bytes()),
+                "diagnostic leaked: {}",
+                String::from_utf8_lossy(bytes),
+            );
+        }
+    }
 }

@@ -181,6 +181,18 @@ pub(crate) fn validate_providers(
 /// the first build only, so a rebuild inside the TUI does not print
 /// over the screen.
 pub(crate) fn build_provider_registry() -> Result<ProviderRegistry, String> {
+    build_provider_registry_with_log(&kage_plugin::default_host_log())
+}
+
+/// Build the provider registry and send replacement warnings through `sink`.
+///
+/// # Errors
+///
+/// Returns an error when user configuration cannot be loaded or its
+/// provider settings fail validation.
+pub(crate) fn build_provider_registry_with_log(
+    sink: &kage_plugin::SharedHostLog,
+) -> Result<ProviderRegistry, String> {
     static WARN_REPLACED: std::sync::Once = std::sync::Once::new();
     let config = kage_core::config::Config::load_default().map_err(|e| e.to_string())?;
     validate_providers(&config.providers)?;
@@ -195,8 +207,11 @@ pub(crate) fn build_provider_registry() -> Result<ProviderRegistry, String> {
     let (registry, replaced) = register_providers(&config, &store, &env_key);
     WARN_REPLACED.call_once(|| {
         for id in &replaced {
-            eprintln!(
-                "kage: [providers.custom.{id}] replaces the catalog provider `{id}` and its models"
+            kage_core::sync::lock(sink).log(
+                kage_plugin::LogLevel::Warn,
+                &format!(
+                    "[providers.custom.{id}] replaces the catalog provider `{id}` and its models"
+                ),
             );
         }
     });

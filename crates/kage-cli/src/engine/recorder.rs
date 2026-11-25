@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
-use kage_core::{LoopEvent, Message, Role, TokenUsage};
-use kage_plugin::{PendingSessionOp, session_plugins::SessionPlugins};
+use kage_core::{LoopEvent, Message, Role, TokenUsage, sync::lock};
+use kage_plugin::{LogLevel, PendingSessionOp, SharedHostLog, session_plugins::SessionPlugins};
 use kage_session::{
     Compaction, Custom, EntryId, Header, Label, MessageEntry, ModelChange, RejectedUsage,
     SessionEntry, SessionError, SessionWriter, UsageCost,
@@ -204,8 +204,9 @@ impl Recorder {
             Some(session) => plugins.take_pending_session_ops_for(session),
             None => plugins.take_pending_session_ops(),
         };
+        let sink = plugins.sink();
         for op in ops {
-            if let Some(entry) = plugin_op_entry(op) {
+            if let Some(entry) = plugin_op_entry(op, &sink) {
                 self.writer()?.append(&entry)?;
             }
         }
@@ -217,7 +218,7 @@ impl Recorder {
 ///
 /// A label whose anchor is not a valid entry id is dropped with a warning:
 /// writing it with a fresh id would silently detach it from its target.
-pub(crate) fn plugin_op_entry(op: PendingSessionOp) -> Option<SessionEntry> {
+pub(crate) fn plugin_op_entry(op: PendingSessionOp, sink: &SharedHostLog) -> Option<SessionEntry> {
     match op {
         PendingSessionOp::AppendCustom { kind, data } => Some(SessionEntry::Custom(Custom {
             id: EntryId::new(),
@@ -227,7 +228,10 @@ pub(crate) fn plugin_op_entry(op: PendingSessionOp) -> Option<SessionEntry> {
         })),
         PendingSessionOp::SetLabel { anchor, text } => {
             let Ok(parsed) = ulid::Ulid::from_string(&anchor) else {
-                eprintln!("kage: set_label: invalid entry id '{anchor}', dropping");
+                lock(sink).log(
+                    LogLevel::Warn,
+                    &format!("set_label: invalid entry id '{anchor}', dropping"),
+                );
                 return None;
             };
             Some(SessionEntry::Label(Label {
@@ -607,13 +611,67 @@ mod tests {
         assert!(matches!(&written[2], SessionEntry::ModelChange(m) if m.model == "mock:b"));
     }
 
+    #[derive(Clone, Default)]
+    struct RecordingSink(Arc<std::sync::Mutex<Vec<(kage_plugin::LogLevel, String)>>>);
+
+    impl kage_plugin::HostLog for RecordingSink {
+        fn notify(&mut self, message: &str) {
+            panic!("unexpected notification: {message}");
+        }
+
+        fn log(&mut self, level: kage_plugin::LogLevel, message: &str) {
+            kage_core::sync::lock(&self.0).push((level, message.to_owned()));
+        }
+    }
+
+    #[test]
+    fn invalid_plugin_anchor_diagnostics_stay_off_stdio() {
+        const CHILD: &str = "KAGE_RECORDER_SINK_REGRESSION_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            plugin_session_ops_are_written_at_turn_end();
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "engine::recorder::tests::invalid_plugin_anchor_diagnostics_stay_off_stdio",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        for bytes in [&output.stdout, &output.stderr] {
+            let marker = b"not-a-ulid";
+            assert!(
+                !bytes.windows(marker.len()).any(|part| part == marker),
+                "diagnostic leaked: {}",
+                String::from_utf8_lossy(bytes),
+            );
+        }
+    }
+
     #[test]
     fn plugin_session_ops_are_written_at_turn_end() {
         let dir = tempfile::tempdir().unwrap();
         let (path, header) = header(dir.path());
         let mut caps = std::collections::BTreeMap::new();
         caps.insert("t".to_owned(), vec!["session_write".to_owned()]);
-        let runtime = Arc::new(PluginRuntime::builder().capabilities(caps).build().unwrap());
+        let recording = RecordingSink::default();
+        let sink: kage_plugin::SharedHostLog =
+            Arc::new(std::sync::Mutex::new(Box::new(recording.clone())));
+        let runtime = Arc::new(
+            PluginRuntime::builder()
+                .capabilities(caps)
+                .sink(sink)
+                .build()
+                .unwrap(),
+        );
         runtime
             .eval_plugin(
                 "t",
@@ -649,5 +707,13 @@ mod tests {
         assert!(matches!(&written[1], SessionEntry::Custom(c) if c.kind == "plugin:tps"));
         assert!(matches!(&written[2], SessionEntry::Label(l) if l.anchor == anchor));
         assert!(runtime.take_pending_session_ops().is_empty());
+        let logs = kage_core::sync::lock(&recording.0);
+        assert_eq!(
+            *logs,
+            [(
+                kage_plugin::LogLevel::Warn,
+                "set_label: invalid entry id 'not-a-ulid', dropping".to_owned()
+            )],
+        );
     }
 }

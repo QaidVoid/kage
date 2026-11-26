@@ -83,6 +83,10 @@ its next turn boundary. An idle one depends on the client:
 | The TUI, the desktop and browser clients | starts a run to read the result |
 | Editors over ACP | keeps the result for your next prompt, whose run reads it first |
 
+An ACP client can choose the other behavior with
+`_meta.kage.background` when it opens the session. See
+[kage extensions](/editors/kage-extensions).
+
 Several results that arrive together are read as one message. A
 result of an agent you stopped waits for the next run instead of
 starting one.

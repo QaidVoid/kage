@@ -2160,10 +2160,12 @@ impl Client {
             }
             SessionUpdate::SessionReplaced(replaced) => self.replace_session(session_id, replaced),
             // Not shown yet: the desktop runs no user shell commands, takes
-            // nothing back from a queue and reads MCP status per server.
+            // nothing back from a queue, reads MCP status per server and
+            // follows a run through its turns.
             SessionUpdate::Shell(_)
             | SessionUpdate::PromptWithdrawn(_)
-            | SessionUpdate::McpServers(_) => Vec::new(),
+            | SessionUpdate::McpServers(_)
+            | SessionUpdate::Run(_) => Vec::new(),
             SessionUpdate::Unknown => {
                 log::debug!("a session/update of an unknown kind arrived");
                 vec![Change::Unknown {

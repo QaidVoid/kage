@@ -8,8 +8,8 @@ use kage_acp::acp::{
     AvailableCommandsUpdate, BlobContent, CompactionPhase, CompactionUpdate, ConfigOptionUpdate,
     ContentBlock, Cost, CurrentModeUpdate, DiffContent, KageMeta, McpServersUpdate,
     McpStatusUpdate, MessageChunk, MessagePhase, MessageUpdate, NoticeTone, NoticeUpdate, Plan,
-    PromptDelivery, PromptWithdrawn, ProviderRetryUpdate, QuestionChoice, QuestionPrompt,
-    SessionConfigSelectOption, SessionInfoUpdate, SessionUpdate, ShellUpdate,
+    PromptDelivery, PromptWithdrawn, ProviderRetryUpdate, QuestionChoice, QuestionPrompt, RunPhase,
+    RunUpdate, SessionConfigSelectOption, SessionInfoUpdate, SessionUpdate, ShellUpdate,
     SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate, SubagentUsage,
     SwarmMeta, ToolCall, ToolCallContent, ToolCallMeta, ToolCallStatus, ToolCallUpdate, ToolKind,
     TurnPhase, TurnReason, TurnUpdate, UsageMeta, UsageTokens, UsageUpdate,
@@ -479,6 +479,14 @@ impl Bridge {
                 if !self.streaming.contains(&session) =>
             {
                 self.mcp_servers(session, &client_id, servers);
+            }
+            Event::Host(HostEvent::RunStarted) => {
+                let update = SessionUpdate::Run(RunUpdate {
+                    phase: RunPhase::Start,
+                    stop_reason: None,
+                    error: None,
+                });
+                self.send(session, &client_id, update);
             }
             Event::Host(HostEvent::RunEnded { outcome }) => {
                 self.finish_compaction(session, &client_id);
@@ -1127,6 +1135,10 @@ impl Bridge {
                     );
                 }
             }
+        }
+        let client_id = lock(&self.ids).by_engine.get(&session).cloned();
+        if let Some(client_id) = client_id.filter(|_| !child) {
+            self.send(session, &client_id, SessionUpdate::Run(end.run_update()));
         }
         for waiter in lock(&self.waiters).remove(&session).unwrap_or_default() {
             let _ = waiter.send(end.clone());

@@ -49,19 +49,19 @@ pub use kage_acp_wire::schema::{
     QuestionChoice, QuestionMeta, QuestionPrompt, RegistryCapability, RegistryInstallRequest,
     RegistryInstallResult, RegistryPackage, RegistrySearchRequest, RegistrySearchResult,
     RequestMeta, RequestPermissionRequest, RequestPermissionResponse, RequestPermissionResult,
-    ResourceLink, ResumeSessionRequest, ResumeSessionResponse, SelectedOption, SessionBackground,
-    SessionCapabilities, SessionConfigCategory, SessionConfigKind, SessionConfigOption,
-    SessionConfigSelectOption, SessionExportResponse, SessionForkRequest, SessionForkResponse,
-    SessionInfo, SessionInfoKage, SessionInfoMeta, SessionInfoUpdate, SessionMode, SessionModes,
-    SessionNotification, SessionOpt, SessionPromptsResponse, SessionRenameRequest,
-    SessionReplacedUpdate, SessionRequest, SessionRewindRequest, SessionUndoResponse,
-    SetModeRequest, SetModeResponse, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
-    ShellRequest, ShellUpdate, StopReason, SubagentSessionCapabilities, SubagentState,
-    SubagentSwarm, SubagentUpdate, SubagentUsage, Supported, SwarmMeta, SwarmResumeRequest,
-    SwarmResumeResponse, TerminalRef, TextContent, ThemesRequest, ThemesResult, ToolCall,
-    ToolCallContent, ToolCallMeta, ToolCallStatus, ToolCallUpdate, ToolKind, TurnPhase, TurnReason,
-    TurnUpdate, UsageMeta, UsageTokens, UsageUpdate, UserTheme, WithdrawRequest,
-    parse_session_config_options,
+    ResourceLink, ResumeSessionRequest, ResumeSessionResponse, RunPhase, RunUpdate, SelectedOption,
+    SessionBackground, SessionCapabilities, SessionConfigCategory, SessionConfigKind,
+    SessionConfigOption, SessionConfigSelectOption, SessionExportResponse, SessionForkRequest,
+    SessionForkResponse, SessionInfo, SessionInfoKage, SessionInfoMeta, SessionInfoUpdate,
+    SessionMode, SessionModes, SessionNotification, SessionOpt, SessionPromptsResponse,
+    SessionRenameRequest, SessionReplacedUpdate, SessionRequest, SessionRewindRequest,
+    SessionUndoResponse, SetModeRequest, SetModeResponse, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, ShellRequest, ShellUpdate, StopReason,
+    SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate, SubagentUsage,
+    Supported, SwarmMeta, SwarmResumeRequest, SwarmResumeResponse, TerminalRef, TextContent,
+    ThemesRequest, ThemesResult, ToolCall, ToolCallContent, ToolCallMeta, ToolCallStatus,
+    ToolCallUpdate, ToolKind, TurnPhase, TurnReason, TurnUpdate, UsageMeta, UsageTokens,
+    UsageUpdate, UserTheme, WithdrawRequest, parse_session_config_options,
 };
 
 /// `_kage/config/get` result: the read-only sections a settings page
@@ -183,6 +183,8 @@ pub enum SessionUpdate {
     SubagentUpdate(SubagentUpdate),
     /// A turn of the running prompt began or ended.
     Turn(TurnUpdate),
+    /// A run of the session began or ended.
+    Run(RunUpdate),
     /// A provider message attempt began or committed.
     Message(MessageUpdate),
     /// A failed provider attempt is about to be retried.
@@ -221,6 +223,7 @@ impl From<SessionUpdate> for wire::SessionUpdate {
             SessionUpdate::ConfigOptionUpdate(update) => Self::ConfigOptionUpdate(update),
             SessionUpdate::SubagentUpdate(update) => Self::SubagentUpdate(update),
             SessionUpdate::Turn(update) => Self::Turn(update),
+            SessionUpdate::Run(update) => Self::Run(update),
             SessionUpdate::Message(update) => Self::Message(update),
             SessionUpdate::ProviderRetry(update) => Self::ProviderRetry(update),
             SessionUpdate::Notice(update) => Self::Notice(update),

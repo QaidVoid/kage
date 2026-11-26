@@ -2394,6 +2394,9 @@ pub enum SessionUpdate {
     /// A turn of the running prompt began or ended.
     #[serde(rename = "_kage/turn")]
     Turn(TurnUpdate),
+    /// A run of the session began or ended.
+    #[serde(rename = "_kage/run")]
+    Run(RunUpdate),
     /// A provider message attempt began or committed.
     #[serde(rename = "_kage/message")]
     Message(MessageUpdate),
@@ -2925,6 +2928,35 @@ pub struct TurnUpdate {
     /// replayed end of a run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub took_ms: Option<u64>,
+}
+
+/// Whether a `_kage/run` update opens or closes a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunPhase {
+    /// The run began.
+    Start,
+    /// The run ended.
+    End,
+}
+
+/// A `_kage/run` update: one run of the session's agent, from its first
+/// turn to its last, whether a `session/prompt` started it or the
+/// session woke to read a background agent's result. The `end` of a
+/// prompted run comes before that prompt's answer, so a client learns
+/// the same ending either way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunUpdate {
+    /// Whether the run began or ended.
+    pub phase: RunPhase,
+    /// How the run ended, as `session/prompt` answers it. Present on
+    /// the `end` of a run that did not fail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
+    /// Why the run failed. Present on the `end` of a failed run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Severity of a `_kage/notice` update.
@@ -4430,6 +4462,34 @@ mod tests {
                 }),
             );
         }
+    }
+
+    #[test]
+    fn run_update_shapes() {
+        roundtrip(
+            &SessionUpdate::Run(RunUpdate {
+                phase: RunPhase::Start,
+                stop_reason: None,
+                error: None,
+            }),
+            serde_json::json!({"sessionUpdate": "_kage/run", "phase": "start"}),
+        );
+        roundtrip(
+            &SessionUpdate::Run(RunUpdate {
+                phase: RunPhase::End,
+                stop_reason: Some(StopReason::EndTurn),
+                error: None,
+            }),
+            serde_json::json!({"sessionUpdate": "_kage/run", "phase": "end", "stopReason": "end_turn"}),
+        );
+        roundtrip(
+            &SessionUpdate::Run(RunUpdate {
+                phase: RunPhase::End,
+                stop_reason: None,
+                error: Some("provider down".into()),
+            }),
+            serde_json::json!({"sessionUpdate": "_kage/run", "phase": "end", "error": "provider down"}),
+        );
     }
 
     #[test]

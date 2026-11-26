@@ -91,6 +91,7 @@ that method handles both images and audio.
 | `sessionUpdate` | Fields | Meaning |
 | --- | --- | --- |
 | `_kage/turn` | `phase` (`start`, `end`), `reason?` (`tool_calls`, `no_tool_calls`), `at?`, `tookMs?` | One provider round trip of the running prompt. A loaded session's history closes each run that ended with an `end` carrying when it ended (`at`, Unix seconds) and how long it took. |
+| `_kage/run` | `phase` (`start`, `end`), `stopReason?`, `error?` | One live run of the session, from its first turn to its last. A run starts for a `session/prompt`, and also on its own when a background agent's result wakes the session. An `end` carries what `session/prompt` answers for that run: `stopReason` when it did not fail, otherwise the `error` message. The `end` of a prompted run comes before the prompt's answer. A run that cannot start, such as one naming an unknown model, sends an `end` without a `start`. |
 | `_kage/message` | `messageId`, `phase` (`start`, `end`) | One provider attempt. Output after `start` is provisional; a matching `end` commits it. Sent only with `attemptOutput`. |
 | `_kage/provider_retry` | `messageId?`, `attempt`, `maxAttempts`, `waitSecs`, `waitMs`, `requestedSecs?`, `error` | Discard the named attempt's provisional output, then show a retry notice. `attempt` is the one-based retry count, `waitMs` the actual backoff, and `requestedSecs` the provider's requested delay when supplied. Without `messageId`, no output is discarded. Sent only with `attemptOutput`, instead of a plain retry notice. |
 | `_kage/notice` | `tone` (`info`, `warn`, `error`, `success`), `text` | A message for the user that is not part of the conversation, such as `goal met: ...`. |
@@ -117,6 +118,14 @@ the `tool_call_update` that ends each tool call.
 session forked from another, so a client can draw the fork tree. An
 external session's entry carries `_meta.kage.externalAgent`, the name of
 its agent.
+
+`session/new`, `session/load` and `session/resume` accept
+`_meta.kage.background`, which says what an idle session does with a
+[background agent](/guide/agents#background-agents)'s result: `wake`
+starts a run to read it, and `hold` keeps it for the next prompt. A kage
+client (one that sent `_meta.kage` at `initialize`) defaults to `wake`,
+and any other client to `hold`. A client that asks for `wake` follows
+the runs nobody prompted through `_kage/run`.
 
 `session/new` accepts `_meta.kage.externalAgent`, the name of an agent
 configured under `[acp.agents]`, to open the session on that agent

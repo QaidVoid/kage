@@ -7144,6 +7144,119 @@ fn a_kage_client_session_wakes_for_a_background_result() {
     assert_eq!(main.call_count(), 3);
 }
 
+/// The `_kage/run` updates on `session` up to and including the next
+/// run `end`, with every other update of the session in between.
+fn until_run_end(inbox: &mpsc::Receiver<Inbound>, session: &str) -> Vec<serde_json::Value> {
+    let mut updates = Vec::new();
+    loop {
+        let Inbound::Notification { params, .. } = inbox.recv_timeout(WAIT).expect("no run end")
+        else {
+            continue;
+        };
+        if params["sessionId"] != session {
+            continue;
+        }
+        let update = params["update"].clone();
+        let done = update["sessionUpdate"] == "_kage/run" && update["phase"] == "end";
+        updates.push(update);
+        if done {
+            return updates;
+        }
+    }
+}
+
+#[test]
+fn a_plain_client_that_asks_to_wake_hears_every_run_begin_and_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().display().to_string();
+    let task =
+        serde_json::json!({"description": "list files", "prompt": "list", "background": true});
+    let main = MockProvider::sequence(vec![
+        tool_turn("call_agent", "agent", task),
+        text_turn("the agent is on it"),
+        text_turn("the agent listed the files"),
+    ]);
+    let agents = MockProvider::sequence(vec![text_turn("child done")]);
+    let (release, gate) = mpsc::channel();
+    let routed = Routed {
+        main: Listed::of(main.clone()),
+        agents: Arc::new(Gated {
+            inner: agents,
+            gate: Mutex::new(gate),
+        }),
+    };
+    let host = test_host_agents(
+        Arc::new(routed),
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+        false,
+        default_agents(),
+        PermissionAction::Allow,
+    );
+    let (srv_r, cli_w) = std::io::pipe().unwrap();
+    let (cli_r, srv_w) = std::io::pipe().unwrap();
+    std::thread::spawn(move || {
+        host.serve_with(BufReader::new(srv_r), srv_w, |_| {})
+            .unwrap();
+    });
+    let (client, inbox, _reader) = kage_jsonrpc::connect(BufReader::new(cli_r), cli_w);
+    initialize(&client);
+    let params = serde_json::json!({
+        "cwd": path,
+        "mcpServers": [],
+        "_meta": {"kage": {"background": "wake"}},
+    });
+    let created = client.request("session/new", params).unwrap();
+    let session = created["sessionId"].as_str().unwrap().to_owned();
+    let runs = |updates: &[serde_json::Value]| -> Vec<serde_json::Value> {
+        updates
+            .iter()
+            .filter(|u| u["sessionUpdate"] == "_kage/run")
+            .cloned()
+            .collect()
+    };
+
+    let response = prompt_async(&client, &session, "go")
+        .recv_timeout(WAIT)
+        .unwrap()
+        .unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    let prompted = until_run_end(&inbox, &session);
+    assert_eq!(
+        runs(&prompted),
+        [
+            serde_json::json!({"sessionUpdate": "_kage/run", "phase": "start"}),
+            serde_json::json!({"sessionUpdate": "_kage/run", "phase": "end", "stopReason": "end_turn"}),
+        ]
+    );
+
+    release.send(()).unwrap();
+    let woken = until_run_end(&inbox, &session);
+    let first = woken.iter().position(|u| u["sessionUpdate"] == "_kage/run");
+    assert_eq!(
+        woken[first.unwrap()],
+        serde_json::json!({"sessionUpdate": "_kage/run", "phase": "start"}),
+        "{woken:#?}"
+    );
+    let report = woken
+        .iter()
+        .find(|u| u["sessionUpdate"] == "user_message_chunk")
+        .and_then(|u| u["content"]["text"].as_str())
+        .expect("the woken run reads the report");
+    assert!(report.contains("child done"), "{report}");
+    let reply = woken
+        .iter()
+        .position(|u| u["content"]["text"] == "the agent listed the files")
+        .expect("the woken run replies");
+    assert!(first.unwrap() < reply, "{woken:#?}");
+    assert_eq!(
+        woken.last().unwrap()["stopReason"],
+        "end_turn",
+        "the woken run's end follows its reply"
+    );
+    assert_eq!(main.call_count(), 3);
+}
+
 fn questions_input() -> serde_json::Value {
     serde_json::json!({"questions": [
         {"header": "Store", "question": "Where should sessions live?",

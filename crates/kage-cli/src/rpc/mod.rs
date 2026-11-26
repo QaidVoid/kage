@@ -81,12 +81,12 @@ use kage_acp::acp::{
     PluginInstallRequest, PluginRemoveRequest, PluginsSource, PromptCapabilities, PromptDelivery,
     PromptRequest, PromptResponse, PromptWithdrawn, RegistryInstallRequest, RegistryInstallResult,
     RegistrySearchRequest, RegistrySearchResult, ResumeSessionRequest, ResumeSessionResponse,
-    SessionBackground, SessionCapabilities, SessionConfigOption, SessionExportResponse,
-    SessionForkRequest, SessionForkResponse, SessionOpt, SessionPromptsResponse,
-    SessionRenameRequest, SessionRequest, SessionRewindRequest, SessionUndoResponse,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, ShellRequest, StopReason,
-    Supported, SwarmResumeRequest, SwarmResumeResponse, ThemesRequest, ThemesResult,
-    WithdrawRequest,
+    RunPhase, RunUpdate, SessionBackground, SessionCapabilities, SessionConfigOption,
+    SessionExportResponse, SessionForkRequest, SessionForkResponse, SessionOpt,
+    SessionPromptsResponse, SessionRenameRequest, SessionRequest, SessionRewindRequest,
+    SessionUndoResponse, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+    ShellRequest, StopReason, Supported, SwarmResumeRequest, SwarmResumeResponse, ThemesRequest,
+    ThemesResult, WithdrawRequest,
 };
 use kage_acp::acp::{UiAttachRequest, UiCommandRequest, UiKeymapRequest, UiOutput, UiSnapshot};
 use kage_acp::agent::{Agent, AgentPeer, OpenReceipt, OpenResult, PromptContext};
@@ -434,6 +434,38 @@ impl Ids {
 struct PromptEnd {
     outcome: RunOutcome,
     stop: Option<CoreStopReason>,
+}
+
+impl PromptEnd {
+    /// What `session/prompt` answers for this ending.
+    fn answer(&self) -> Result<PromptResponse, RpcError> {
+        match &self.outcome {
+            RunOutcome::Completed => Ok(PromptResponse {
+                stop_reason: stop_reason(self.stop),
+            }),
+            RunOutcome::Cancelled => Ok(PromptResponse {
+                stop_reason: StopReason::Cancelled,
+            }),
+            RunOutcome::Failed {
+                error: LoopError::InvalidPrompt { message },
+            } => Err(RpcError::new(-32602, message.clone())),
+            RunOutcome::Failed { error } => Err(RpcError::internal(error.to_string())),
+        }
+    }
+
+    /// The `_kage/run` end of this ending, carrying what
+    /// [`Self::answer`] says.
+    fn run_update(&self) -> RunUpdate {
+        let (stop_reason, error) = match self.answer() {
+            Ok(response) => (Some(response.stop_reason), None),
+            Err(error) => (None, Some(error.message)),
+        };
+        RunUpdate {
+            phase: RunPhase::End,
+            stop_reason,
+            error,
+        }
+    }
 }
 
 /// Host bookkeeping for one external open. Announcing resolves it after the
@@ -1932,21 +1964,9 @@ impl Agent for CliAcpAgent {
                 });
             }
         }
-        let end = end
-            .recv()
-            .map_err(|_| RpcError::internal("engine stopped"))?;
-        match end.outcome {
-            RunOutcome::Completed => Ok(PromptResponse {
-                stop_reason: stop_reason(end.stop),
-            }),
-            RunOutcome::Cancelled => Ok(PromptResponse {
-                stop_reason: StopReason::Cancelled,
-            }),
-            RunOutcome::Failed {
-                error: LoopError::InvalidPrompt { message },
-            } => Err(RpcError::new(-32602, message)),
-            RunOutcome::Failed { error } => Err(RpcError::internal(error.to_string())),
-        }
+        end.recv()
+            .map_err(|_| RpcError::internal("engine stopped"))?
+            .answer()
     }
 
     fn cancel(&self, session_id: &str) {

@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [0.7.1](https://github.com/QaidVoid/kage/compare/v0.7.0...v0.7.1) - 2026-11-27
+
+### Features
+
+- *(acp)* Report every run with a _kage/run update - ([d09ab7b](https://github.com/QaidVoid/kage/commit/d09ab7b276ec6e8408934f99f7c639d632e30e7e))
+- *(config)* Allow built-in model metadata overrides - ([9ab4329](https://github.com/QaidVoid/kage/commit/9ab4329ef87cc19ea6d02c56c4276edc1fb0e0e9))
+- *(loop)* Make compaction reply reserve configurable - ([b43a8f5](https://github.com/QaidVoid/kage/commit/b43a8f5b07650fa25cb50c918f57cab5fb3a759c))
+- *(tui)* Add notification history and configurable toasts - ([39a8c89](https://github.com/QaidVoid/kage/commit/39a8c891c27ef7163c1619958440bc8f4e23a0a9))
+
+### Bug Fixes
+
+- *(chatgpt)* Prefer the default context window - ([1484f43](https://github.com/QaidVoid/kage/commit/1484f43ed7f0426581ef1b0d3402af50a43f86bc))
+- *(loop)* Reject unusable turns without losing usage - ([8fd46ea](https://github.com/QaidVoid/kage/commit/8fd46ead3b038a4bf91f0ccbdaa0b81fd17ce8c4))
+- *(loop)* Repair tool results within their assistant batch - ([b60f8f1](https://github.com/QaidVoid/kage/commit/b60f8f1afdf666274fac68016d2240901533e78e))
+- *(provider)* Classify 5xx context overflow before retrying - ([8367df7](https://github.com/QaidVoid/kage/commit/8367df7bbf29c2b16da6795cc916fc9d646ee21e))
+- *(provider)* Keep ChatGPT pricing independent of its cache - ([9bf29d7](https://github.com/QaidVoid/kage/commit/9bf29d7ea57cc3c2aecf80bce084a606f1f0f2f8))
+- *(session)* Restore stable recorded cost totals - ([909f3ac](https://github.com/QaidVoid/kage/commit/909f3ac7fdd2542e1711c31c69a394dced23b784))
+- *(tui)* Route embedded host diagnostics through the UI - ([7429c06](https://github.com/QaidVoid/kage/commit/7429c06c507d38e24af71ea1a630d10a09a09bf0))
+- *(tui)* Place alert badges after permission mode - ([3ab245d](https://github.com/QaidVoid/kage/commit/3ab245df6802f6231242a7d0de9d545c1c0b9f9a))
+
+### Testing
+
+- *(tools)* Isolate private URL check from proxy settings - ([5b11f96](https://github.com/QaidVoid/kage/commit/5b11f969b1d85671ab5f5c2be6dc9073ea54c428))
+
 ### Features
 
 - Configure early-compaction headroom independently with
